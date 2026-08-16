@@ -135,3 +135,4 @@ uv run rag.py "How many days of PTO do new hires get?"
 - **Empty query**: the UI blocks submission with a warning; `rag.py`'s
   `answer_question("")` returns a friendly prompt instead of calling the LLM.
 # Odyssey-port6-RAG
+# Odyssey-port6-RAG
