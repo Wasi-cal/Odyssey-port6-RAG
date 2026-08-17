@@ -94,6 +94,27 @@ API_BASE_URL=http://your-host:8000 uv run streamlit run app.py
 uv run rag.py "How many days of PTO do new hires get?"
 ```
 
+## Run with Docker
+
+Both processes also run as two containers from one shared image
+(`Dockerfile`), wired together by `docker-compose.yml`. The API's `/health`
+endpoint gates the UI's startup, and `data/`, `chroma_db/`, and `reports/`
+are bind-mounted so ingested documents and the vector store persist across
+rebuilds.
+
+```bash
+# uses the OPENAI_API_KEY already in .env (see Setup above)
+docker compose up --build
+```
+
+Then open `http://localhost:8501`. The API is also reachable directly at
+`http://localhost:8000` (e.g. `curl http://localhost:8000/health`).
+
+Note: the image pins Python 3.12, not whatever your local `.venv` uses --
+`langchain-chroma` requires `numpy<2.0`, which has no prebuilt wheel for
+Python 3.13 on Linux, and the slim image has no C compiler to build it from
+source.
+
 ## How it works
 
 1. **Ingestion** (`ingest.py`): each PDF is loaded page-by-page with
