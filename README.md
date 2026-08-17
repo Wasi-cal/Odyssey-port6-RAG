@@ -21,14 +21,20 @@ document + page citations.
 rag-doc-assistant/
 ├── data/pdfs/          # source PDFs live here
 ├── chroma_db/          # persisted Chroma store (auto-created, git-ignored)
+├── reports/            # eval reports + query_log.jsonl (auto-created, git-ignored)
 ├── ingest.py           # PDF -> chunk -> embed -> persist to Chroma
 ├── rag.py              # query -> retrieve -> grounded, cited answer
-├── app.py              # Streamlit UI: upload, ask, show answer + sources
+├── api.py              # FastAPI serving layer -- thin wrapper around rag.py/ingest.py
+├── app.py              # Streamlit UI -- HTTP client of api.py, no direct RAG imports
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
 └── README.md
 ```
+
+`api.py` is the only process that imports `rag.py`/`ingest.py` at runtime for
+serving traffic. `app.py` talks to it over HTTP; `eval/run_eval.py` imports
+`rag.py` directly instead, since it's testing the pipeline, not the API.
 
 ## Setup
 
@@ -59,15 +65,30 @@ This builds/updates the persisted Chroma store at `./chroma_db`. You can skip
 this step entirely and just upload PDFs through the UI instead — both paths
 call the same ingestion code.
 
-**2. Launch the app:**
+**2. Run both processes.** The Streamlit UI is now an HTTP client of a
+FastAPI serving layer — start the API first, then the UI, in two terminals:
 
 ```bash
+# Terminal 1 -- the API (retrieval/generation/ingestion live here)
+uv run uvicorn api:app --reload
+
+# Terminal 2 -- the Streamlit UI (talks to the API over HTTP)
 uv run streamlit run app.py
 ```
 
-Then open the URL Streamlit prints (usually `http://localhost:8501`).
+Then open the URL Streamlit prints (usually `http://localhost:8501`). If the
+UI shows "Can't reach the API," the `uvicorn` process either isn't running
+or is on a different host/port than `app.py` expects — see `API_BASE_URL`
+below.
 
-**3. (Optional) Command-line sanity check without the UI:**
+By default `app.py` calls the API at `http://localhost:8000`. If you run the
+API somewhere else, point the UI at it:
+
+```bash
+API_BASE_URL=http://your-host:8000 uv run streamlit run app.py
+```
+
+**3. (Optional) Command-line sanity check without either process:**
 
 ```bash
 uv run rag.py "How many days of PTO do new hires get?"

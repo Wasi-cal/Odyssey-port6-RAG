@@ -1,0 +1,125 @@
+# golden_questions.yaml — the labeled test set for eval/run_eval.py
+#
+# HOW TO ADD MORE QUESTIONS:
+#   1. Ingest your PDFs first (`uv run ingest.py`) if you haven't already.
+#   2. Open a PDF, find a fact you can point at a specific page, and write a
+#      plain-English question a real employee might ask for it.
+#   3. Aim for roughly 8 in_scope questions (spread across your different
+#      documents, not just one) and 3 out_of_scope questions -- include at
+#      least one "near miss" out_of_scope question (plausible-sounding, maybe
+#      even mentioning a real company/document name, but not actually
+#      answerable from your docs) to check the system doesn't just latch onto
+#      a keyword match and hallucinate.
+#
+# SCHEMA (one YAML mapping per question):
+#   id:              unique short string, e.g. "q1"
+#   question:        plain-English question to ask the RAG system
+#   type:             "in_scope" | "out_of_scope"
+#   expected_source:  filename of the PDF that actually answers it (in_scope only)
+#   expected_pages:   list of page numbers where the answer lives (in_scope only)
+#                     -- any one of these pages counts as a hit; list more than
+#                     one if the fact legitimately appears on multiple pages
+#                     (e.g. once in prose, once in a table).
+#   key_facts:        list of short facts the answer MUST contain (in_scope
+#                     only) -- used by the --judge answer-correctness check.
+#
+# out_of_scope items only need id/question/type -- omit expected_source,
+# expected_pages, and key_facts entirely for those.
+#
+# This set is built against the three sample HR handbooks in data/pdfs/
+# (Cedar Valley, Harborlight, Northstar Ridge) -- if you swap in your own
+# PDFs, replace these questions with ones grounded in your own documents.
+
+# -- Cedar Valley Consumer Systems --------------------------------------
+
+- id: q1
+  question: "How many weeks of paid parental leave does Cedar Valley Consumer Systems offer?"
+  type: in_scope
+  expected_source: "Cedar_Valley_HR_Policy_Handbook.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Up to 10 weeks of paid parental leave"
+    - "Employees must complete six months of continuous service to be eligible"
+
+- id: q2
+  question: "What is the domestic hotel reimbursement limit per night at Cedar Valley?"
+  type: in_scope
+  expected_source: "Cedar_Valley_HR_Policy_Handbook.pdf"
+  expected_pages: [2, 4]  # stated in prose on p.2 and repeated in the limits table on p.4
+  key_facts:
+    - "$210 per night before taxes for domestic hotel stays"
+
+# -- Harborlight Manufacturing & Digital Services ------------------------
+
+- id: q3
+  question: "How many business days per year can a Harborlight employee work remotely for a short-term personal need?"
+  type: in_scope
+  expected_source: "Harborlight_HR_Policy_Handbook.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Up to 20 business days in a calendar year"
+    - "Request must be submitted at least five business days before the start date"
+
+- id: q4
+  question: "How many vacation days per year does a Harborlight employee with 6 years of tenure receive?"
+  type: in_scope
+  expected_source: "Harborlight_HR_Policy_Handbook.pdf"
+  expected_pages: [4]
+  key_facts:
+    - "18 vacation days per year for the 2-4 or 5-9 year tenure band"
+
+- id: q5
+  question: "How many weeks of company-paid parental leave does Harborlight provide, versus total parental leave eligibility?"
+  type: in_scope
+  expected_source: "Harborlight_HR_Policy_Handbook.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Up to 12 weeks of parental leave total eligibility, after 12 months of service"
+    - "Four weeks of that leave is company-paid"
+
+# -- Northstar Ridge Technologies -----------------------------------------
+
+- id: q6
+  question: "How many days per week can a Northstar Ridge employee work remotely under the hybrid policy?"
+  type: in_scope
+  expected_source: "Northstar_Ridge_HR_Policy_Handbook.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Up to three days per week"
+    - "Default in-office days are Tuesday and Wednesday"
+
+- id: q7
+  question: "How much paid sick leave do Northstar Ridge employees accrue?"
+  type: in_scope
+  expected_source: "Northstar_Ridge_HR_Policy_Handbook.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "8 hours of paid sick leave per completed month of employment"
+    - "Capped at 80 hours per calendar year"
+
+- id: q8
+  question: "How many vacation days per year does a Northstar Ridge employee with 4 years of tenure get?"
+  type: in_scope
+  expected_source: "Northstar_Ridge_HR_Policy_Handbook.pdf"
+  expected_pages: [4]
+  key_facts:
+    - "18 vacation days per year (144 hours) for the 3-5 year tenure band"
+
+# -- Out of scope ----------------------------------------------------------
+
+- id: q9
+  question: "What's the weather forecast for tomorrow?"
+  type: out_of_scope
+
+- id: q10
+  question: "What is Cedar Valley Consumer Systems' stock ticker symbol?"
+  type: out_of_scope
+  # "Near miss": a real company name from the library, but the handbooks
+  # don't cover anything about stock/investor information -- checks that
+  # retrieval doesn't hallucinate just because the company name matched.
+
+- id: q11
+  question: "What is the employer's 401(k) matching percentage?"
+  type: out_of_scope
+  # "Near miss": a very ordinary HR topic an employee might assume is in
+  # here, but none of the three handbooks mention retirement benefits at all.

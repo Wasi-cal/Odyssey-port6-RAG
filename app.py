@@ -1,21 +1,30 @@
 """
 app.py — Streamlit UI: upload PDFs, ask questions, see cited answers.
 
-This module never talks to Chroma directly. It calls ingest.ingest_files() to
-write new documents in and rag.answer_question() to read grounded answers
-out — keeping the read/write split between the three files clean.
+This module is a pure API CLIENT. It never imports rag.py or ingest.py, and
+never talks to Chroma or OpenAI directly -- all of that lives behind the
+FastAPI service in api.py. This file only makes HTTP calls to that API and
+renders the response. Run both processes together (see README.md):
+  1) uvicorn api:app --reload
+  2) streamlit run app.py
 """
 
 import os
 from pathlib import Path
 
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-from ingest import DATA_DIR, ingest_files
-from rag import answer_question, store_is_empty
-
 load_dotenv()
+
+API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
+
+# Not an import of ingest.py -- just the same relative path, duplicated as a
+# plain literal, purely so the UI can list what's on disk. No RAG logic
+# depends on this; it's display-only, kept in sync by convention (both
+# api.py and app.py run from the project root).
+DATA_DIR = Path(__file__).parent / "data" / "pdfs"
 
 st.set_page_config(page_title="Internal Docs Assistant", page_icon="📄", layout="centered")
 
@@ -23,8 +32,8 @@ st.set_page_config(page_title="Internal Docs Assistant", page_icon="📄", layou
 # Session state
 # --------------------------------------------------------------------------
 # history: list of past Q&A turns so they stay visible across reruns
-# ingested_files: names already saved to data/pdfs/ this session, so a
-#   duplicate upload doesn't re-embed the same file twice per rerun.
+# ingested_files: names already uploaded this session, so a duplicate
+#   upload doesn't re-POST the same file twice per rerun.
 if "history" not in st.session_state:
     st.session_state.history = []
 if "ingested_files" not in st.session_state:
@@ -36,10 +45,18 @@ st.caption(
     "docs. Answers are grounded only in the PDFs you upload — nothing else."
 )
 
-if not os.environ.get("OPENAI_API_KEY"):
+# --------------------------------------------------------------------------
+# API reachability check
+# --------------------------------------------------------------------------
+try:
+    api_up = requests.get(f"{API_BASE_URL}/health", timeout=3).status_code == 200
+except requests.exceptions.RequestException:
+    api_up = False
+
+if not api_up:
     st.error(
-        "OPENAI_API_KEY is not set. Copy `.env.example` to `.env`, add your OpenAI "
-        "API key, and restart the app."
+        f"Can't reach the API at `{API_BASE_URL}`. Start it with "
+        f"`uvicorn api:app --reload` (see README.md), then reload this page."
     )
     st.stop()
 
@@ -55,26 +72,25 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    new_paths = []
-    for uploaded in uploaded_files:
-        if uploaded.name in st.session_state.ingested_files:
-            continue
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        dest = DATA_DIR / uploaded.name
-        dest.write_bytes(uploaded.getvalue())
-        new_paths.append(dest)
-        st.session_state.ingested_files.add(uploaded.name)
+    new_files = [f for f in uploaded_files if f.name not in st.session_state.ingested_files]
 
-    if new_paths:
-        with st.spinner(f"Embedding {len(new_paths)} new document(s)..."):
+    if new_files:
+        with st.spinner(f"Embedding {len(new_files)} new document(s)..."):
             try:
-                chunk_count = ingest_files(new_paths)
-                st.success(
-                    f"Ingested {len(new_paths)} file(s) "
-                    f"({[p.name for p in new_paths]}) — {chunk_count} chunks added."
-                )
-            except RuntimeError as e:
-                st.error(str(e))
+                multipart = [("files", (f.name, f.getvalue(), "application/pdf")) for f in new_files]
+                resp = requests.post(f"{API_BASE_URL}/ingest", files=multipart, timeout=300)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for f in new_files:
+                        st.session_state.ingested_files.add(f.name)
+                    st.success(
+                        f"Ingested {len(data['ingested'])} file(s) "
+                        f"({data['ingested']}) — {data['chunk_count']} chunks added."
+                    )
+                else:
+                    st.error(f"Ingestion failed: {resp.json().get('detail', resp.text)}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Could not reach the API: {e}")
 
 existing_pdfs = sorted(p.name for p in DATA_DIR.glob("*.pdf")) if DATA_DIR.exists() else []
 if existing_pdfs:
@@ -97,23 +113,27 @@ ask_clicked = st.button("Ask", type="primary")
 if ask_clicked:
     if not question.strip():
         st.warning("Please enter a question before clicking Ask.")
-    elif store_is_empty():
-        st.warning("No documents have been ingested yet. Upload a PDF above first.")
     else:
         with st.spinner("Retrieving relevant passages and generating an answer..."):
             try:
-                result = answer_question(question)
-                st.session_state.history.insert(
-                    0,
-                    {
-                        "question": question,
-                        "answer": result.answer,
-                        "sources": result.sources,
-                        "num_chunks": result.num_chunks_retrieved,
-                    },
-                )
-            except RuntimeError as e:
-                st.error(str(e))
+                resp = requests.post(f"{API_BASE_URL}/ask", json={"question": question}, timeout=120)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    st.session_state.history.insert(
+                        0,
+                        {
+                            "question": question,
+                            "answer": data["answer"],
+                            "sources": data["sources"],  # already-formatted citation strings
+                            "num_chunks": data["num_chunks"],
+                        },
+                    )
+                elif resp.status_code == 400:
+                    st.warning(resp.json().get("detail", "Invalid request."))
+                else:
+                    st.error(f"API error: {resp.json().get('detail', resp.text)}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Could not reach the API: {e}")
 
 # --------------------------------------------------------------------------
 # Answer + history
@@ -130,7 +150,7 @@ if st.session_state.history:
             st.markdown("**Sources**")
             if turn["sources"]:
                 for s in turn["sources"]:
-                    st.markdown(f"- 📄 `{s['source']}` — page {s['page']}")
+                    st.markdown(f"- 📄 {s}")
             else:
                 st.caption("No sources — this question was out of scope for the library.")
 
