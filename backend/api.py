@@ -27,19 +27,37 @@ not this transport layer.
 import json
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from assistant import config_store, db
 from assistant.orchestration.client import get_temporal_client
 from assistant.orchestration.config import TASK_QUEUE
 from assistant.orchestration.workflows.ingestion_workflow import IngestDocumentsWorkflow
 from ingest import DATA_DIR
 from rag import answer_question, format_citation
 
-app = FastAPI(title="Internal Documents Assistant API")
+_DATA_DIR_RESOLVED = DATA_DIR.resolve()
+
+# Truncation matches the frontend's own ChatSession.add_message title logic
+# (doc_assist/domain/models.py) -- kept in sync by eye since it's a one-liner
+# duplicated on both sides of the API boundary, not worth sharing a package for.
+_TITLE_MAX_LEN = 40
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()
+    config_store.seed_defaults()
+    yield
+
+
+app = FastAPI(title="Internal Documents Assistant API", lifespan=lifespan)
 
 REPORTS_DIR = Path(__file__).parent / "reports"
 QUERY_LOG_PATH = REPORTS_DIR / "query_log.jsonl"
@@ -56,6 +74,8 @@ class HealthResponse(BaseModel):
 
 class AskRequest(BaseModel):
     question: str
+    session_id: str
+    user_id: str
 
 
 class AskResponse(BaseModel):
@@ -68,6 +88,28 @@ class AskResponse(BaseModel):
 class IngestResponse(BaseModel):
     ingested: list[str]
     chunk_count: int
+
+
+class DocumentInfo(BaseModel):
+    name: str
+    chunk_count: int
+    ingested_at: str
+
+
+class SessionInfo(BaseModel):
+    id: str
+    title: str | None
+    created_at: str
+
+
+class CreateSessionRequest(BaseModel):
+    user_id: str
+
+
+class MessageInfo(BaseModel):
+    role: str
+    content: str
+    meta: dict | None = None
 
 
 # --------------------------------------------------------------------------
@@ -118,11 +160,29 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
+@app.get("/config")
+def get_config() -> dict:
+    """The current effective config (system prompt, retrieval tuning, etc.),
+    as read through the same Redis-cached path /ask and ingestion use --
+    mainly for confirming a direct Postgres edit to config_settings has
+    taken effect, without needing DB access to check.
+    """
+    try:
+        return config_store.get_all()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Config unavailable: {e}") from e
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(payload: AskRequest) -> AskResponse:
     question = (payload.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty.")
+
+    db.ensure_user(payload.user_id)
+    db.add_message(payload.session_id, "user", question, None)
+    title = question[:_TITLE_MAX_LEN] + ("…" if len(question) > _TITLE_MAX_LEN else "")
+    db.set_session_title_if_unset(payload.session_id, title)
 
     start = time.perf_counter()
     try:
@@ -140,6 +200,13 @@ def ask(payload: AskRequest) -> AskResponse:
 
     _log_query(question, result.num_chunks_retrieved, latency_ms, raw_source_filenames)
 
+    meta = {
+        "sources": formatted_sources,
+        "num_chunks": result.num_chunks_retrieved,
+        "latency_ms": latency_ms,
+    }
+    db.add_message(payload.session_id, "assistant", result.answer, meta)
+
     return AskResponse(
         answer=result.answer,
         sources=formatted_sources,
@@ -149,9 +216,13 @@ def ask(payload: AskRequest) -> AskResponse:
 
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest_endpoint(files: list[UploadFile] = File(...)) -> IngestResponse:
+async def ingest_endpoint(
+    files: list[UploadFile] = File(...), user_id: str = Form(...)
+) -> IngestResponse:
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
+
+    db.ensure_user(user_id)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     saved_paths = []
@@ -170,10 +241,8 @@ async def ingest_endpoint(files: list[UploadFile] = File(...)) -> IngestResponse
         # -- same underlying pipeline, now durable against a transient
         # OpenAI rate-limit or a worker crash mid-batch. See
         # assistant/orchestration/ for the workflow/activity definitions.
-        # The request/response contract here is unchanged: this still
-        # returns {ingested, chunk_count} synchronously.
         client = await get_temporal_client()
-        chunk_count = await client.execute_workflow(
+        chunk_counts = await client.execute_workflow(
             IngestDocumentsWorkflow.run,
             [str(p) for p in saved_paths],
             id=f"ingest-{uuid.uuid4()}",
@@ -182,4 +251,53 @@ async def ingest_endpoint(files: list[UploadFile] = File(...)) -> IngestResponse
     except Exception as e:
         raise HTTPException(status_code=500, detail=_unwrap_temporal_error(e)) from e
 
-    return IngestResponse(ingested=filenames, chunk_count=chunk_count)
+    for filename, chunk_count in zip(filenames, chunk_counts):
+        db.add_document(user_id, filename, chunk_count)
+
+    return IngestResponse(ingested=filenames, chunk_count=sum(chunk_counts))
+
+
+@app.get("/library", response_model=list[DocumentInfo])
+def get_library(user_id: str) -> list[DocumentInfo]:
+    db.ensure_user(user_id)
+    return [DocumentInfo(**d) for d in db.list_documents(user_id)]
+
+
+@app.get("/sessions", response_model=list[SessionInfo])
+def get_sessions(user_id: str) -> list[SessionInfo]:
+    db.ensure_user(user_id)
+    return [SessionInfo(**s) for s in db.list_sessions(user_id)]
+
+
+@app.post("/sessions", response_model=SessionInfo)
+def create_session(payload: CreateSessionRequest) -> SessionInfo:
+    db.ensure_user(payload.user_id)
+    return SessionInfo(**db.create_session(payload.user_id))
+
+
+@app.get("/sessions/{session_id}/messages", response_model=list[MessageInfo])
+def get_session_messages(session_id: str) -> list[MessageInfo]:
+    return [MessageInfo(**m) for m in db.get_messages(session_id)]
+
+
+@app.get("/documents/{filename}")
+def get_document(filename: str) -> FileResponse:
+    """Serves a previously-ingested PDF's raw bytes, for the frontend's
+    Library links to view (inline, in a new tab) or download.
+
+    filename is reduced to its final path component before touching the
+    filesystem, so a value like "../../etc/passwd" can't escape DATA_DIR --
+    it isn't validated against any particular user's library, since the
+    underlying document set (Chroma's collection) is already shared across
+    all users for retrieval, same as it is today.
+    """
+    safe_name = Path(filename).name
+    path = _DATA_DIR_RESOLVED / safe_name
+    if not path.is_file() or path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=safe_name,
+        content_disposition_type="inline",
+    )

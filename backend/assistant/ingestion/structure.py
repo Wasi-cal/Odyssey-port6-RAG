@@ -63,6 +63,21 @@ def _is_all_caps_heading(line: str) -> bool:
     return s == s.upper() and s != s.lower()
 
 
+_MARKDOWN_EMPHASIS_RE = re.compile(r"[*_]{1,3}")
+
+
+def _clean_heading_text(text: str) -> str:
+    """pymupdf4llm renders bold/italic PDF text as markdown emphasis
+    (**bold**, *italic*), and a document's headings are very often just a
+    bold run end to end -- e.g. "## **1. Scope, Definitions**" -- so left
+    alone, every citation and LLM context line downstream would show the
+    literal "**" markers instead of clean heading text. Strip them once
+    here, at the point the heading is captured, rather than patching every
+    place that later displays a section/subsection string.
+    """
+    return _MARKDOWN_EMPHASIS_RE.sub("", text).strip()
+
+
 def detect_headings(text: str) -> list[tuple[int, int, str]]:
     """Scan the whole-document text for heading-like lines. Returns a list of
     (char_offset, level, heading_text) sorted by offset (built in reading
@@ -75,12 +90,12 @@ def detect_headings(text: str) -> list[tuple[int, int, str]]:
         clause_match = None if md_match else _NUMBERED_CLAUSE_RE.match(stripped)
         if md_match:
             level = len(md_match.group(1))
-            headings.append((offset, level, md_match.group(2).strip()))
+            headings.append((offset, level, _clean_heading_text(md_match.group(2))))
         elif clause_match:
             level = clause_match.group(1).count(".") + 1
-            headings.append((offset, level, stripped))
+            headings.append((offset, level, _clean_heading_text(stripped)))
         elif _is_all_caps_heading(stripped):
-            headings.append((offset, 1, stripped.title()))
+            headings.append((offset, 1, _clean_heading_text(stripped).title()))
         offset += len(line) + 1  # +1 for the "\n" split() consumed
     return headings
 

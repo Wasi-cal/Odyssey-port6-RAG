@@ -1,4 +1,36 @@
 services:
+  # --- App data (chat history + document library, keyed by user_id) ------
+  app-db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=docassist
+      - POSTGRES_PASSWORD=docassist
+      - POSTGRES_DB=docassist
+    ports:
+      # Host 5432 is already taken by a local Postgres on this machine (see
+      # `lsof -iTCP:5432`) -- published on 5433 instead, for pgAdmin4 or psql
+      # from the host. Containers on the compose network still reach it as
+      # app-db:5432 (see DATABASE_URL below), unaffected by this mapping.
+      - "5433:5432"
+    volumes:
+      - app-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docassist"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # --- Live config cache (assistant/config_store.py) ----------------------
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   # --- Temporal (durable, per-file-retryable ingestion workflow) ---------
   temporal-db:
     image: postgres:15-alpine
@@ -52,6 +84,8 @@ services:
       - ./backend/.env
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
+      - DATABASE_URL=postgresql://docassist:docassist@app-db:5432/docassist
+      - REDIS_URL=redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
@@ -59,7 +93,12 @@ services:
       - ./backend/chroma_db:/app/chroma_db
       - ./backend/reports:/app/reports
     depends_on:
-      - temporal
+      temporal:
+        condition: service_started
+      app-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -78,6 +117,10 @@ services:
       --browser.gatherUsageStats false
     environment:
       - API_BASE_URL=http://api:8000
+      # Browser-facing: the Library's "view PDF" links are rendered as plain
+      # <a href> tags the user's own browser navigates to, so they need the
+      # host-published port, not the Docker-internal service name above.
+      - PUBLIC_API_BASE_URL=http://localhost:8000
     ports:
       - "8501:8501"
     depends_on:
@@ -87,3 +130,4 @@ services:
 
 volumes:
   temporal-db-data:
+  app-db-data:

@@ -1,37 +1,100 @@
 """Wraps st.session_state so the rest of the app never touches the raw
 session dict directly.
+
+Sessions, messages, and the document library are fetched from the backend
+(Postgres-backed, see backend/assistant/db.py) on first load of each
+Streamlit connection and cached here for the rest of it -- this class is
+never their source of truth, just a per-connection cache, so a page refresh
+or container restart never loses them.
+
+Each past chat is also addressable by its id via the "chat" URL query param
+(?chat=<uuid>, the same uuid backend/assistant/db.py already mints for
+chat_sessions.id) -- see _resolve_initial_session and switch_session. A
+brand-new chat has no URL yet: it only becomes addressable once it gets its
+first reply (application.py calls publish_current_session_url() at that
+point), matching a fresh, empty chat being unnamed/untitled until then too.
 """
 
 import streamlit as st
 
-from .models import ChatSession
+from ..api.client import ApiClient
+from .models import ChatMessage, ChatSession
+
+_QUERY_PARAM = "chat"
 
 
 class SessionStore:
-    def __init__(self):
+    def __init__(self, api: ApiClient, user_id: str):
+        self.api = api
+        self.user_id = user_id
+
         if "sessions" not in st.session_state:
             st.session_state.sessions = {}
             st.session_state.session_order = []
-            st.session_state.session_counter = 0
             st.session_state.current_session_id = None
-        if "ingested_files" not in st.session_state:
-            st.session_state.ingested_files = set()
+            self._load_sessions_from_backend()
+
         if "library" not in st.session_state:
-            st.session_state.library = []
+            st.session_state.library = self.api.get_library(user_id)
+
         if "pending_question" not in st.session_state:
             st.session_state.pending_question = None
 
         if st.session_state.current_session_id is None:
-            self.new_session()
+            self._resolve_initial_session()
 
     # -- sessions --------------------------------------------------------
+    def _load_sessions_from_backend(self) -> None:
+        """Most-recently-created first, matching GET /sessions' ordering."""
+        rows = self.api.get_sessions(self.user_id)
+        for row in rows:
+            st.session_state.sessions[row["id"]] = ChatSession(id=row["id"], title=row["title"])
+            st.session_state.session_order.append(row["id"])
+
+    def _resolve_initial_session(self) -> None:
+        """A URL of ?chat=<id> reopens that specific past chat; anything else
+        -- a bare app load, or a stale/foreign id -- starts a brand-new,
+        still-unaddressable chat instead of silently resuming whatever was
+        open last -- a bare app load is always meant to land on a fresh chat.
+        """
+        requested = st.query_params.get(_QUERY_PARAM)
+        if requested and requested in st.session_state.sessions:
+            self.switch_session(requested)
+            return
+        if requested:
+            del st.query_params[_QUERY_PARAM]
+        self.new_session()
+
+    def _ensure_messages_loaded(self, session_id: str) -> None:
+        session = st.session_state.sessions[session_id]
+        if session.messages:
+            return
+        for row in self.api.get_messages(session_id):
+            session.messages.append(
+                ChatMessage(role=row["role"], content=row["content"], meta=row.get("meta"))
+            )
+
     def new_session(self) -> str:
-        st.session_state.session_counter += 1
-        sid = f"s{st.session_state.session_counter}"
+        created = self.api.create_session(self.user_id)
+        # Falls back to a local-only id if the backend is briefly unreachable
+        # -- chat still works this run, it just won't survive a refresh.
+        sid = created["id"] if created else f"local-{len(st.session_state.session_order) + 1}"
         st.session_state.sessions[sid] = ChatSession(id=sid)
         st.session_state.session_order.insert(0, sid)
         st.session_state.current_session_id = sid
+        if _QUERY_PARAM in st.query_params:
+            del st.query_params[_QUERY_PARAM]
         return sid
+
+    def switch_session(self, session_id: str) -> None:
+        self._ensure_messages_loaded(session_id)
+        st.session_state.current_session_id = session_id
+        st.query_params[_QUERY_PARAM] = session_id
+
+    def publish_current_session_url(self) -> None:
+        """Promotes the current (until-now-unaddressable) chat to its own
+        ?chat=<id> URL. Called once, right after its first reply lands."""
+        st.query_params[_QUERY_PARAM] = self.current_session_id
 
     @property
     def current_session_id(self) -> str:
@@ -39,7 +102,7 @@ class SessionStore:
 
     @current_session_id.setter
     def current_session_id(self, session_id: str) -> None:
-        st.session_state.current_session_id = session_id
+        self.switch_session(session_id)
 
     @property
     def current_session(self) -> ChatSession:
@@ -61,13 +124,10 @@ class SessionStore:
         return st.session_state.library
 
     def is_ingested(self, filename: str) -> bool:
-        return filename in st.session_state.ingested_files
+        return any(entry["name"] == filename for entry in st.session_state.library)
 
-    def mark_ingested(self, filename: str) -> None:
-        st.session_state.ingested_files.add(filename)
-
-    def add_library_entry(self, name: str, chunk_count: int) -> None:
-        st.session_state.library.append({"name": name, "chunk_count": chunk_count})
+    def refresh_library(self) -> None:
+        st.session_state.library = self.api.get_library(self.user_id)
 
     # -- pending question (set by a suggestion-chip click) ------------------
     @property

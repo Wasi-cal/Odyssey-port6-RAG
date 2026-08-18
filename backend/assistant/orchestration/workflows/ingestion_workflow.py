@@ -40,8 +40,13 @@ class IngestDocumentsWorkflow:
     """
 
     @workflow.run
-    async def run(self, pdf_paths: list[str]) -> int:
-        chunk_counts = await asyncio.gather(
+    async def run(self, pdf_paths: list[str]) -> list[int]:
+        """Returns one chunk count per input path, same order as pdf_paths --
+        callers that only want the batch total can sum() this themselves;
+        api.py needs the per-file breakdown to record accurate library
+        entries per document.
+        """
+        return await asyncio.gather(
             *[
                 workflow.execute_activity(
                     ingest_document_activity,
@@ -52,4 +57,3 @@ class IngestDocumentsWorkflow:
                 for pdf_path in pdf_paths
             ]
         )
-        return sum(chunk_counts)

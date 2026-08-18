@@ -15,12 +15,12 @@ class ApiClient:
         except ValueError:
             return resp.text or f"API returned status {resp.status_code}."
 
-    def ask(self, question: str) -> tuple[str, dict | None]:
+    def ask(self, question: str, session_id: str, user_id: str) -> tuple[str, dict | None]:
         """POST /ask. Returns (answer_text, meta). Never raises."""
         try:
             resp = requests.post(
                 f"{self.base_url}/ask",
-                json={"question": question},
+                json={"question": question, "session_id": session_id, "user_id": user_id},
                 timeout=120,
             )
             if resp.status_code == 200:
@@ -43,7 +43,7 @@ class ApiClient:
         except requests.exceptions.RequestException:
             return f"Error: Could not reach the API at {self.base_url}.", None
 
-    def ingest(self, files) -> dict:
+    def ingest(self, files, user_id: str) -> dict:
         """POST /ingest (multipart PDFs). Returns either
         {"ok": True, "ingested": [...], "chunk_count": N} or
         {"ok": False, "error": "..."}. Never raises.
@@ -52,7 +52,12 @@ class ApiClient:
             multipart = [
                 ("files", (f.name, f.getvalue(), "application/pdf")) for f in files
             ]
-            resp = requests.post(f"{self.base_url}/ingest", files=multipart, timeout=300)
+            resp = requests.post(
+                f"{self.base_url}/ingest",
+                files=multipart,
+                data={"user_id": user_id},
+                timeout=300,
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 return {
@@ -65,3 +70,49 @@ class ApiClient:
             return {"ok": False, "error": "Ingestion timed out. Try again with fewer files."}
         except requests.exceptions.RequestException:
             return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
+
+    def get_library(self, user_id: str) -> list[dict]:
+        """GET /library. Returns [] on any failure -- an empty library is a
+        safe, silent fallback (the sidebar already handles it), unlike ask/
+        ingest where an error needs to be shown to the user.
+        """
+        try:
+            resp = requests.get(f"{self.base_url}/library", params={"user_id": user_id}, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+        except requests.exceptions.RequestException:
+            pass
+        return []
+
+    def get_sessions(self, user_id: str) -> list[dict]:
+        """GET /sessions. Returns [] on any failure, same rationale as
+        get_library."""
+        try:
+            resp = requests.get(f"{self.base_url}/sessions", params={"user_id": user_id}, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+        except requests.exceptions.RequestException:
+            pass
+        return []
+
+    def create_session(self, user_id: str) -> dict | None:
+        """POST /sessions. Returns None on failure -- caller falls back to a
+        local-only session id so the app stays usable even if the backend is
+        briefly unreachable."""
+        try:
+            resp = requests.post(f"{self.base_url}/sessions", json={"user_id": user_id}, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+        except requests.exceptions.RequestException:
+            pass
+        return None
+
+    def get_messages(self, session_id: str) -> list[dict]:
+        """GET /sessions/{id}/messages. Returns [] on any failure."""
+        try:
+            resp = requests.get(f"{self.base_url}/sessions/{session_id}/messages", timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+        except requests.exceptions.RequestException:
+            pass
+        return []

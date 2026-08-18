@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
+from .. import config_store
 from ..openai_key import require_openai_api_key
 from .citations import dedupe_sources, extract_cited_docs, format_context
 from .prompt import FALLBACK_ANSWER, GENERATION_MODEL, GENERATION_TEMPERATURE, SYSTEM_PROMPT
@@ -27,36 +28,54 @@ def answer_question(question: str) -> RagResult:
     Returns the fallback "I don't know..." string (with empty sources) both
     when nothing is retrieved and whenever the LLM itself decides the
     retrieved context doesn't answer the question.
+
+    The system prompt, fallback string, and generation model/temperature are
+    read fresh from config_store on every call (not at import time) -- that's
+    what lets a direct Postgres edit to config_settings take effect on its
+    own, without restarting this process. Each config_store.get() falls back
+    to this module's own constant if the config subsystem is unreachable.
     """
     require_openai_api_key()
+
+    system_prompt = config_store.get("generation", "system_prompt", SYSTEM_PROMPT)
+    fallback_answer = config_store.get("generation", "fallback_answer", FALLBACK_ANSWER)
+    generation_model = config_store.get("generation", "model", GENERATION_MODEL)
+    generation_temperature = config_store.get("generation", "temperature", GENERATION_TEMPERATURE)
 
     question = (question or "").strip()
     if not question:
         return RagResult(answer="Please enter a question.", sources=[], num_chunks_retrieved=0)
 
     if store_is_empty():
-        return RagResult(answer=FALLBACK_ANSWER, sources=[], num_chunks_retrieved=0)
+        return RagResult(answer=fallback_answer, sources=[], num_chunks_retrieved=0)
 
     retriever = get_retriever()
     docs = retriever.invoke(question)
 
     if not docs:
-        return RagResult(answer=FALLBACK_ANSWER, sources=[], num_chunks_retrieved=0)
+        return RagResult(answer=fallback_answer, sources=[], num_chunks_retrieved=0)
 
     context = format_context(docs)
 
-    llm = ChatOpenAI(model=GENERATION_MODEL, temperature=GENERATION_TEMPERATURE)
+    llm = ChatOpenAI(model=generation_model, temperature=generation_temperature)
     prompt = ChatPromptTemplate.from_messages(
-        [("system", SYSTEM_PROMPT), ("human", "{question}")]
+        [("system", system_prompt), ("human", "{question}")]
     )
     chain = prompt | llm
 
-    response = chain.invoke({"context": context, "question": question})
+    # fallback_answer is interpolated into system_prompt's rule 2 (see
+    # prompt.py) so editing just the fallback_answer config value updates
+    # both what the model is told to say AND what this function compares
+    # its output against below -- editing one without the other would
+    # otherwise silently break the fallback-detection check.
+    response = chain.invoke(
+        {"context": context, "question": question, "fallback_answer": fallback_answer}
+    )
     answer_text = response.content.strip()
 
     # If the model correctly declined to answer, don't attach sources that
     # would falsely imply the documents supported a claim.
-    if answer_text == FALLBACK_ANSWER:
+    if answer_text == fallback_answer:
         return RagResult(answer=answer_text, sources=[], num_chunks_retrieved=len(docs))
 
     # Sources come from only the [n] labels the model actually cited in its

@@ -19,32 +19,16 @@ class MessageView:
         lines = []
         for src in sources:
             try:
-                doc, detail = parse_citation(src)
+                doc, heading, page_label = parse_citation(src)
             except Exception:
-                doc, detail = str(src), ""
-            line = f"{doc} · {detail}" if detail else doc
+                doc, heading, page_label = str(src), "", ""
+            # Document, then the page it's on, then the heading it came from.
+            line = " · ".join(part for part in (doc, page_label, heading) if part)
             lines.append(html.escape(line))
         st.markdown(
             f'<div class="citation-line">{"<br>".join(lines)}</div>',
             unsafe_allow_html=True,
         )
-
-    @staticmethod
-    def render_footer(meta: dict) -> None:
-        if not meta:
-            return
-        parts = []
-        latency_ms = meta.get("latency_ms")
-        num_chunks = meta.get("num_chunks")
-        if isinstance(latency_ms, (int, float)):
-            parts.append(f"{latency_ms / 1000:.1f}s")
-        if isinstance(num_chunks, int):
-            parts.append(f"{num_chunks} chunk{'s' if num_chunks != 1 else ''}")
-        if parts:
-            st.markdown(
-                f'<div class="footer-note">{" · ".join(parts)}</div>',
-                unsafe_allow_html=True,
-            )
 
     def render(self, role: str, content: str, meta: dict | None, key: str) -> None:
         with st.container(key=f"msgrow-{role}-{key}"):
@@ -53,7 +37,6 @@ class MessageView:
                 st.markdown(content)
             if role == "assistant" and meta:
                 self.render_citations(meta.get("sources", []))
-                self.render_footer(meta)
 
 
 class ConversationView:

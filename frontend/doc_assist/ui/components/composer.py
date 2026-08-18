@@ -18,25 +18,37 @@ class Composer:
         """
         session_id = store.current_session_id
         typed_question, attached = self._render_input(session_id, store)
-        if attached:
-            self.ingest(attached, store)
 
         question = (store.pending_question or typed_question or "").strip()
         store.pending_question = None
+
+        if attached:
+            # Skip the immediate rerun when a question was submitted
+            # alongside the attachment -- it still needs to reach the
+            # caller to be asked this run; _ask_and_append reruns once it's
+            # done, which redraws the sidebar with the refreshed library too.
+            self.ingest(attached, store, rerun_when_idle=not question)
+
         return question
 
-    def ingest(self, files, store: SessionStore) -> None:
-        """Upload PDFs to the backend and record them in the library."""
+    def ingest(self, files, store: SessionStore, rerun_when_idle: bool = True) -> None:
+        """Upload PDFs to the backend and refresh the library from it.
+
+        Reruns on success (unless rerun_when_idle=False) -- the sidebar
+        (rendered earlier in this same script run, before the composer)
+        would otherwise keep showing the stale library until some later,
+        unrelated interaction triggers the next rerun, which reads as "my
+        upload didn't show up until I refreshed."
+        """
         new_files = [f for f in files if not store.is_ingested(f.name)]
         if not new_files:
             return
         with st.spinner(f"Ingesting {len(new_files)} document(s)…"):
-            result = self.api.ingest(new_files)
+            result = self.api.ingest(new_files, store.user_id)
         if result["ok"]:
-            for f in new_files:
-                store.mark_ingested(f.name)
-            for name in result["ingested"]:
-                store.add_library_entry(name, result["chunk_count"])
+            store.refresh_library()
+            if rerun_when_idle:
+                st.rerun()
         else:
             st.error(result["error"])
 

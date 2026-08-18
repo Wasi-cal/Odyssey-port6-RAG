@@ -1,10 +1,11 @@
 """Sidebar: brand mark, "+ New chat", Library, Chat History."""
 
 import html
+import urllib.parse
 
 import streamlit as st
 
-from ...config import BRAND_ICON_SVG, DOC_ICON_SVG
+from ...config import BRAND_ICON_SVG, DOC_ICON_SVG, PUBLIC_API_BASE_URL
 from ...domain.session_store import SessionStore
 
 
@@ -31,9 +32,12 @@ class Sidebar:
         with st.expander("LIBRARY", expanded=True):
             if store.library:
                 for entry in store.library:
+                    name = entry["name"]
+                    url = f"{PUBLIC_API_BASE_URL}/documents/{urllib.parse.quote(name)}"
                     st.markdown(
                         f'<div class="doc-row">{DOC_ICON_SVG}'
-                        f'<span>{html.escape(entry["name"])}</span></div>',
+                        f'<a class="doc-link" href="{html.escape(url)}" '
+                        f'target="_blank" rel="noopener">{html.escape(name)}</a></div>',
                         unsafe_allow_html=True,
                     )
             else:

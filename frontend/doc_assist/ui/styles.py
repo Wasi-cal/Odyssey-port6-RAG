@@ -141,6 +141,12 @@ html, body, .stApp,
 [data-testid="stSidebar"] button[data-testid="stBaseButton-tertiary"] > div {
     justify-content: flex-start; width: 100%;
 }
+/* Chat History entries: force left-aligned, single-line + ellipsis (not
+   Streamlit's default centered button label), matching the Library rows. */
+[data-testid="stSidebar"] button[data-testid="stBaseButton-tertiary"] p {
+    text-align: left; width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 [data-testid="stSidebar"] button[data-testid="stBaseButton-tertiary"]:hover {
     background: #F0F1F5;
 }
@@ -176,10 +182,12 @@ html, body, .stApp,
 [data-testid="stSidebar"] [data-testid="stExpanderDetails"] { padding-bottom: 6px; }
 
 .doc-row { display: flex; align-items: center; gap: 9px; padding: 7px 8px; }
-.doc-row span {
+.doc-row span, .doc-row .doc-link {
     font-size: 12.5px; font-weight: 500; color: #3C4258;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.doc-row .doc-link { text-decoration: none; }
+.doc-row .doc-link:hover { color: #171B2E; text-decoration: underline; }
 .empty-row { font-size: 12px; color: #B4B8C4; padding: 4px 8px; line-height: 1.6; }
 
 /* ---- Empty-state hero ---- */
@@ -271,9 +279,6 @@ html, body, .stApp,
 .citation-line {
     font-size: 11.5px; color: #9297A6; padding: 6px 4px 0;
     line-height: 1.6; text-align: left;
-}
-.footer-note {
-    color: #B4B8C4; font-size: 11px; padding: 2px 4px 0; text-align: left;
 }
 
 [class*="st-key-bubble-user-"] a,

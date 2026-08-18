@@ -5,6 +5,7 @@ opens the same collection to write.
 from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
 
+from .. import config_store
 from ..embeddings import get_embeddings
 from ..paths import COLLECTION_NAME, PERSIST_DIR
 from .config import K, SEARCH_TYPE
@@ -38,9 +39,17 @@ def _get_store() -> Chroma:
     )
 
 
-def get_retriever(k: int = K):
+def get_retriever(k: int | None = None):
+    """k/search_type come from config_store (live, Postgres-backed via
+    Redis) on every call, falling back to this module's K/SEARCH_TYPE
+    constants if the config subsystem is unreachable -- same live-reload
+    contract as retrieval/qa.py's generation settings.
+    """
+    if k is None:
+        k = config_store.get("retrieval", "k", K)
+    search_type = config_store.get("retrieval", "search_type", SEARCH_TYPE)
     store = _get_store()
-    return store.as_retriever(search_type=SEARCH_TYPE, search_kwargs={"k": k})
+    return store.as_retriever(search_type=search_type, search_kwargs={"k": k})
 
 
 def store_is_empty() -> bool:

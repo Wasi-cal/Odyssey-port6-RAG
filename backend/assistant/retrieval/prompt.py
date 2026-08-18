@@ -45,7 +45,7 @@ below, you don't know it for the purposes of this answer.
 
 2. If the context doesn't contain enough information to answer, respond \
 with EXACTLY this sentence and NOTHING else -- no citations, no partial \
-answer, no explanation: "I don't know based on the provided documents." \
+answer, no explanation: "{fallback_answer}" \
 When genuinely unsure whether the context supports an answer, take this \
 path rather than guessing -- a confident wrong answer is worse than an \
 honest "I don't know" for this tool.

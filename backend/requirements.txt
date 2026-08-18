@@ -17,6 +17,17 @@ fastapi>=0.115.0,<0.120.0
 uvicorn[standard]>=0.30.0,<0.35.0
 python-multipart>=0.0.9,<0.1.0
 
+# Persistence for chat history + document library (assistant/db.py) -- keyed
+# by user_id so it's ready for real auth later. Separate from the Temporal
+# Postgres instance in docker-compose.yml (that one is Temporal's internal
+# store, not application data).
+psycopg[binary]>=3.1,<4.0
+psycopg-pool>=3.2,<4.0
+
+# Live-config cache (assistant/config_store.py) -- read path for hot
+# app config (system prompts, retrieval tuning) backed by Postgres.
+redis>=5.0,<6.0
+
 # Ingestion orchestration (assistant/orchestration/, worker.py) -- durable,
 # per-file-retryable ingestion workflow/activities
 temporalio>=1.7.0,<2.0.0

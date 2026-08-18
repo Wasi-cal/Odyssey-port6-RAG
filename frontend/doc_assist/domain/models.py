@@ -32,20 +32,25 @@ class ChatSession(BaseModel):
         return message
 
 
-def parse_citation(citation) -> tuple[str, str]:
-    """Split a pre-formatted citation string into (doc, detail) for display.
+def parse_citation(citation) -> tuple[str, str, str]:
+    """Split a pre-formatted citation string into (doc, heading, page_label)
+    for display, page-first.
 
     sources[] items come from the backend's rag.format_citation as
-    "Doc → Section, p.N" or "Doc, p.N". Parse those shapes when possible;
-    otherwise fall back to showing the raw value. Never raises.
+    "Doc → Section, p.N", "Doc → Section → Subsection, p.N", or "Doc, p.N".
+    Parse those shapes when possible; otherwise fall back to showing the raw
+    value as `doc` with no heading/page. Never raises.
     """
     if not isinstance(citation, str) or not citation.strip():
-        return "Unknown source", ""
+        return "Unknown source", "", ""
     text = citation.strip()
-    if " → " in text:
-        doc, detail = text.split(" → ", 1)
-        return doc.strip(), detail.strip()
+
+    page_label = ""
     if ", p." in text:
-        doc, page = text.rsplit(", p.", 1)
-        return doc.strip(), f"p. {page.strip()}"
-    return text, ""
+        text, page_part = text.rsplit(", p.", 1)
+        page_label = f"Pg {page_part.strip()}"
+
+    if " → " in text:
+        doc, heading = text.split(" → ", 1)
+        return doc.strip(), heading.strip(), page_label
+    return text.strip(), "", page_label
