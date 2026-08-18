@@ -39,3 +39,14 @@ def get_vector_store() -> Chroma:
         client_settings=ChromaSettings(anonymized_telemetry=False, is_persistent=True),
         collection_metadata={"hnsw:space": "cosine"},
     )
+
+
+def delete_document(filename: str) -> None:
+    """Removes every chunk whose "source" metadata equals filename (see
+    pipeline.py's chunk metadata schema) from the persisted collection.
+
+    Goes through the raw chromadb collection, not Chroma.delete() --
+    langchain_chroma's wrapper only accepts ids and silently drops any other
+    kwarg (including where), so a metadata-filtered delete has to bypass it.
+    """
+    get_vector_store()._collection.delete(where={"source": filename})

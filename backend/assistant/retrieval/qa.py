@@ -3,6 +3,7 @@ grounded, cited answer -- ties retrieval/store.py, retrieval/citations.py,
 and retrieval/prompt.py together.
 """
 
+import re
 from dataclasses import dataclass, field
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -10,13 +11,17 @@ from langchain_openai import ChatOpenAI
 
 from .. import config_store
 from ..openai_key import require_openai_api_key
+from ..paths import DATA_DIR
 from .citations import dedupe_sources, extract_cited_docs, format_context
 from .prompt import (
+    FALLBACK_GREETING,
+    FALLBACK_HANDOFF,
     FALLBACK_UNANSWERED,
     FALLBACK_UNCLEAR,
     FALLBACK_UNRELATED,
     GENERATION_MODEL,
     GENERATION_TEMPERATURE,
+    LIST_DOCUMENTS_MARKER,
     SYSTEM_PROMPT,
 )
 from .store import get_retriever, store_is_empty
@@ -27,28 +32,90 @@ class RagResult:
     answer: str
     sources: list[dict] = field(default_factory=list)  # [{"source":..., "page":..., "section":..., "subsection":...}, ...]
     num_chunks_retrieved: int = 0
+    title: str | None = None  # a short chat-session title, from the same LLM call -- None if none was generated (e.g. the empty-store/no-docs early returns below, which never call the LLM)
 
 
-def answer_question(question: str) -> RagResult:
+# Matches system_prompt's "TITLE: ...\nANSWER: ..." envelope (see prompt.py)
+# -- DOTALL so ANSWER's captured group can span the answer's own newlines
+# (multi-paragraph answers, bulleted lists, a trailing "Citations:" line).
+_TITLE_ANSWER_RE = re.compile(r"TITLE:\s*(.*?)\s*\n+ANSWER:\s*(.*)", re.DOTALL)
+
+# Status text handed to the model as "Previous title: ..." on a session's
+# first message (see the invoke() call below) -- system_prompt tells it this
+# is never a value to echo, but a plain greeting with nothing else to name
+# has occasionally come back verbatim anyway. _split_title_and_answer
+# catches that as a defensive backstop, not just a prompt instruction.
+_NO_PREVIOUS_TITLE = "(none yet -- this is the first message)"
+
+
+def _split_title_and_answer(raw_text: str) -> tuple[str | None, str]:
+    """Splits the model's "TITLE: ...\\nANSWER: ..." response into (title,
+    answer). Falls back to (None, raw_text) if the model ever doesn't follow
+    that format, so a formatting slip degrades to "no title this time"
+    rather than showing the user a garbled "TITLE: ..." response.
+    """
+    match = _TITLE_ANSWER_RE.match(raw_text.strip())
+    if not match:
+        return None, raw_text.strip()
+    title, answer = match.groups()
+    title = title.strip()
+    if not title or title == _NO_PREVIOUS_TITLE:
+        title = None
+    return title, answer.strip()
+
+
+def _list_documents_answer() -> str:
+    """Builds the real "here's what I have access to" answer -- the actual
+    current filenames on disk (the same set Chroma's chunks are drawn from),
+    not something the LLM tries to recall on its own.
+    """
+    names = sorted(p.name for p in DATA_DIR.glob("*.pdf"))
+    if not names:
+        return "I don't have any documents available right now."
+    listing = "\n".join(f"- {name}" for name in names)
+    return f"I have access to the following documents:\n\n{listing}"
+
+
+def answer_question(question: str, previous_title: str | None = None) -> RagResult:
     """Retrieve relevant chunks and generate a grounded, cited answer.
 
-    Returns one of three fallback strings (with empty sources), depending on
-    why a grounded answer isn't possible: the question was unclear (asks the
-    user to rephrase), unrelated to the document set (says so), or clear and
-    in scope but genuinely uncovered by the documents (points the user at HR
-    to escalate). The empty-store and nothing-retrieved cases below use the
-    last of those, since there's no context for the LLM to classify against.
+    Returns one of several fixed responses (with empty sources) instead of a
+    grounded content answer when one isn't appropriate: a greeting/small talk
+    gets a friendly intro, a request for a human gets pointed at HR, "what
+    documents do you have" gets the real current library, an unclear question
+    asks the user to rephrase, an unrelated one says so, and a clear-but-
+    uncovered one points the user at HR to escalate. The empty-store and
+    nothing-retrieved cases below use the last of those, since there's no
+    context for the LLM to classify against.
 
-    The system prompt and these three strings, plus the generation
+    The system prompt and these fixed strings, plus the generation
     model/temperature, are read fresh from config_store on every call (not
     at import time) -- that's what lets a direct Postgres edit to
     config_settings take effect on its own, without restarting this process.
     Each config_store.get() falls back to this module's own constant if the
     config subsystem is unreachable.
+
+    RagResult.title comes from the same LLM call, not a second dedicated
+    one -- system_prompt asks for a short "TITLE: ...\nANSWER: ..." envelope
+    on every response, and _split_title_and_answer pulls the two apart
+    before anything else here runs. previous_title (the session's current
+    title, or None on its first message) is handed back to the model so it
+    can keep, refine, or broaden it as the conversation actually evolves,
+    instead of the title being frozen at whatever the first message alone
+    suggested -- api.py is what calls this on every /ask, not just the
+    first. RagResult.title is None for the empty-store and nothing-
+    retrieved cases below, since those never call the LLM at all -- api.py
+    falls back to its own naive truncation of the question in that case
+    (only when there's no previous_title yet to just keep instead).
     """
     require_openai_api_key()
 
     system_prompt = config_store.get("generation", "system_prompt", SYSTEM_PROMPT)
+    fallback_greeting = config_store.get("generation", "fallback_greeting", FALLBACK_GREETING)
+    fallback_handoff = config_store.get("generation", "fallback_handoff", FALLBACK_HANDOFF)
+    list_documents_marker = config_store.get(
+        "generation", "list_documents_marker", LIST_DOCUMENTS_MARKER
+    )
     fallback_unclear = config_store.get("generation", "fallback_unclear", FALLBACK_UNCLEAR)
     fallback_unrelated = config_store.get("generation", "fallback_unrelated", FALLBACK_UNRELATED)
     fallback_unanswered = config_store.get(
@@ -78,27 +145,42 @@ def answer_question(question: str) -> RagResult:
     )
     chain = prompt | llm
 
-    # The three fallback strings are interpolated into system_prompt's rule 2
-    # (see prompt.py) so editing one of these config values updates both what
-    # the model is told to say AND what this function compares its output
-    # against below -- editing one without the other would otherwise silently
-    # break the fallback-detection check.
+    # These fixed strings are interpolated into system_prompt's rule 2 (see
+    # prompt.py) so editing one of these config values updates both what the
+    # model is told to say AND what this function compares its output
+    # against below -- editing one without the other would otherwise
+    # silently break the fallback-detection check.
     response = chain.invoke(
         {
             "context": context,
             "question": question,
+            "previous_title": previous_title or _NO_PREVIOUS_TITLE,
+            "fallback_greeting": fallback_greeting,
+            "fallback_handoff": fallback_handoff,
+            "list_documents_marker": list_documents_marker,
             "fallback_unclear": fallback_unclear,
             "fallback_unrelated": fallback_unrelated,
             "fallback_unanswered": fallback_unanswered,
         }
     )
-    answer_text = response.content.strip()
+    title, answer_text = _split_title_and_answer(response.content)
 
-    # If the model correctly declined to answer (any of the three fallback
+    if answer_text == list_documents_marker:
+        return RagResult(
+            answer=_list_documents_answer(), sources=[], num_chunks_retrieved=len(docs), title=title
+        )
+
+    # If the model correctly declined to answer (any of the fixed-response
     # paths), don't attach sources that would falsely imply the documents
     # supported a claim.
-    if answer_text in (fallback_unclear, fallback_unrelated, fallback_unanswered):
-        return RagResult(answer=answer_text, sources=[], num_chunks_retrieved=len(docs))
+    if answer_text in (
+        fallback_greeting,
+        fallback_handoff,
+        fallback_unclear,
+        fallback_unrelated,
+        fallback_unanswered,
+    ):
+        return RagResult(answer=answer_text, sources=[], num_chunks_retrieved=len(docs), title=title)
 
     # Sources come from only the [n] labels the model actually cited in its
     # answer, NOT from every chunk that was retrieved -- see format_context
@@ -111,4 +193,5 @@ def answer_question(question: str) -> RagResult:
         answer=answer_text,
         sources=dedupe_sources(cited_docs),
         num_chunks_retrieved=len(docs),
+        title=title,
     )

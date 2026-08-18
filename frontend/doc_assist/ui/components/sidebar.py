@@ -34,12 +34,26 @@ class Sidebar:
                 for entry in store.library:
                     name = entry["name"]
                     url = f"{PUBLIC_API_BASE_URL}/documents/{urllib.parse.quote(name)}"
-                    st.markdown(
-                        f'<div class="doc-row">{DOC_ICON_SVG}'
-                        f'<a class="doc-link" href="{html.escape(url)}" '
-                        f'target="_blank" rel="noopener">{html.escape(name)}</a></div>',
-                        unsafe_allow_html=True,
-                    )
+                    col_doc, col_delete = st.columns([9, 1], vertical_alignment="center")
+                    with col_doc:
+                        st.markdown(
+                            f'<div class="doc-row">{DOC_ICON_SVG}'
+                            f'<a class="doc-link" href="{html.escape(url)}" '
+                            f'target="_blank" rel="noopener">{html.escape(name)}</a></div>',
+                            unsafe_allow_html=True,
+                        )
+                    with col_delete:
+                        if st.button(
+                            "✕",
+                            key=f"delete-doc-{name}",
+                            type="tertiary",
+                            help=f"Delete {name}",
+                        ):
+                            error = store.delete_document(name)
+                            if error:
+                                st.error(error)
+                            else:
+                                st.rerun()
             else:
                 st.markdown(
                     '<div class="empty-row">No documents yet.</div>',

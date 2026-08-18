@@ -38,7 +38,7 @@ class SessionStore:
             self._load_sessions_from_backend()
 
         if st.session_state.get("library") is None:
-            fetched = self.api.get_library(user_id)
+            fetched = self.api.get_library()
             if fetched is not None:
                 st.session_state.library = fetched
 
@@ -145,9 +145,20 @@ class SessionStore:
         -- a transient failure should never wipe out a library that was
         already showing something real.
         """
-        fetched = self.api.get_library(self.user_id)
+        fetched = self.api.get_library()
         if fetched is not None:
             st.session_state.library = fetched
+
+    def delete_document(self, filename: str) -> str | None:
+        """Deletes a document (everywhere -- see api.delete_document_endpoint)
+        and refreshes the library. Returns an error message on failure, None
+        on success.
+        """
+        result = self.api.delete_document(filename)
+        if not result["ok"]:
+            return result["error"]
+        self.refresh_library()
+        return None
 
     # -- pending question (set by a suggestion-chip click) ------------------
     @property

@@ -61,6 +61,16 @@ services:
       - "7233:7233"
     restart: unless-stopped
 
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "8080:8080"
+    depends_on:
+      - temporal
+    restart: unless-stopped
+
   worker:
     build: ./backend
     command: python worker.py

@@ -70,11 +70,14 @@ def seed_defaults() -> None:
     """
     from .retrieval.config import K, SEARCH_TYPE
     from .retrieval.prompt import (
+        FALLBACK_GREETING,
+        FALLBACK_HANDOFF,
         FALLBACK_UNANSWERED,
         FALLBACK_UNCLEAR,
         FALLBACK_UNRELATED,
         GENERATION_MODEL,
         GENERATION_TEMPERATURE,
+        LIST_DOCUMENTS_MARKER,
         SYSTEM_PROMPT,
     )
 
@@ -85,6 +88,27 @@ def seed_defaults() -> None:
                 "key": "system_prompt",
                 "value": SYSTEM_PROMPT,
                 "description": "Grounding system prompt sent to the LLM for every /ask call.",
+            },
+            {
+                "category": "generation",
+                "key": "fallback_greeting",
+                "value": FALLBACK_GREETING,
+                "description": "Returned for a greeting/thanks/small talk with no real question in it.",
+            },
+            {
+                "category": "generation",
+                "key": "fallback_handoff",
+                "value": FALLBACK_HANDOFF,
+                "description": "Returned when the user asks to talk to a human/agent instead of this assistant.",
+            },
+            {
+                "category": "generation",
+                "key": "list_documents_marker",
+                "value": LIST_DOCUMENTS_MARKER,
+                "description": (
+                    "Internal signal (never shown to users) the model outputs for "
+                    "'what documents do you have' -- qa.py substitutes the real library for it."
+                ),
             },
             {
                 "category": "generation",

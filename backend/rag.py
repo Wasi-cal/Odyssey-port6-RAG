@@ -23,11 +23,14 @@ from assistant.openai_key import require_openai_api_key
 from assistant.retrieval.citations import format_citation
 from assistant.retrieval.config import K, SEARCH_TYPE
 from assistant.retrieval.prompt import (
+    FALLBACK_GREETING,
+    FALLBACK_HANDOFF,
     FALLBACK_UNANSWERED,
     FALLBACK_UNCLEAR,
     FALLBACK_UNRELATED,
     GENERATION_MODEL,
     GENERATION_TEMPERATURE,
+    LIST_DOCUMENTS_MARKER,
     SYSTEM_PROMPT,
 )
 from assistant.retrieval.qa import RagResult, answer_question
@@ -38,6 +41,9 @@ __all__ = [
     "SEARCH_TYPE",
     "GENERATION_MODEL",
     "GENERATION_TEMPERATURE",
+    "FALLBACK_GREETING",
+    "FALLBACK_HANDOFF",
+    "LIST_DOCUMENTS_MARKER",
     "FALLBACK_UNCLEAR",
     "FALLBACK_UNRELATED",
     "FALLBACK_UNANSWERED",

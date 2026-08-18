@@ -39,6 +39,8 @@ from langchain_openai import ChatOpenAI  # noqa: E402  (after sys.path insert)
 
 from rag import (  # noqa: E402
     K,
+    FALLBACK_GREETING,
+    FALLBACK_HANDOFF,
     FALLBACK_UNANSWERED,
     FALLBACK_UNCLEAR,
     FALLBACK_UNRELATED,
@@ -48,11 +50,17 @@ from rag import (  # noqa: E402
     store_is_empty,
 )
 
-# A correct refusal can land on any of the three fallback paths (rule 2 in
+# A correct refusal can land on any of the fixed-response paths (rule 2 in
 # retrieval/prompt.py) -- an out_of_scope golden question isn't labeled with
-# which one it should trigger, so any of the three counts as "didn't
+# which one it should trigger, so any of these counts as "didn't
 # hallucinate", which is what this eval is actually checking for.
-_FALLBACK_RESPONSES = {FALLBACK_UNCLEAR, FALLBACK_UNRELATED, FALLBACK_UNANSWERED}
+_FALLBACK_RESPONSES = {
+    FALLBACK_GREETING,
+    FALLBACK_HANDOFF,
+    FALLBACK_UNCLEAR,
+    FALLBACK_UNRELATED,
+    FALLBACK_UNANSWERED,
+}
 
 # --------------------------------------------------------------------------
 # Constants

@@ -2,6 +2,8 @@
 calls live here -- this class only shapes requests/responses for the UI.
 """
 
+import urllib.parse
+
 import requests
 
 
@@ -29,6 +31,10 @@ class ApiClient:
                     "sources": data.get("sources", []),
                     "num_chunks": data.get("num_chunks"),
                     "latency_ms": data.get("latency_ms"),
+                    # The session's current title, evolving turn by turn as
+                    # the conversation goes (see api.AskResponse.title) --
+                    # None only if nothing changed and there wasn't one yet.
+                    "title": data.get("title"),
                 }
                 return data["answer"], meta
             if resp.status_code == 400:
@@ -64,6 +70,7 @@ class ApiClient:
                     "ok": True,
                     "ingested": data.get("ingested", []),
                     "chunk_count": data.get("chunk_count", 0),
+                    "skipped": data.get("skipped", []),
                 }
             return {"ok": False, "error": self._extract_error(resp)}
         except requests.exceptions.Timeout:
@@ -71,14 +78,32 @@ class ApiClient:
         except requests.exceptions.RequestException:
             return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
 
-    def get_library(self, user_id: str) -> list[dict] | None:
-        """GET /library. Returns None on any failure -- distinct from a
-        genuinely empty [] -- so SessionStore knows to retry later instead
-        of caching a transient failure (e.g. the API restarting) as if it
-        were a real "no documents yet" for the rest of the browser session.
+    def delete_document(self, filename: str) -> dict:
+        """DELETE /documents/{filename}. Returns either {"ok": True} or
+        {"ok": False, "error": "..."}. Never raises.
         """
         try:
-            resp = requests.get(f"{self.base_url}/library", params={"user_id": user_id}, timeout=30)
+            resp = requests.delete(
+                f"{self.base_url}/documents/{urllib.parse.quote(filename, safe='')}",
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return {"ok": True}
+            return {"ok": False, "error": self._extract_error(resp)}
+        except requests.exceptions.Timeout:
+            return {"ok": False, "error": "Delete timed out."}
+        except requests.exceptions.RequestException:
+            return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
+
+    def get_library(self) -> list[dict] | None:
+        """GET /library -- global, not scoped to a user (see api.get_library).
+        Returns None on any failure -- distinct from a genuinely empty [] --
+        so SessionStore knows to retry later instead of caching a transient
+        failure (e.g. the API restarting) as if it were a real "no documents
+        yet" for the rest of the browser session.
+        """
+        try:
+            resp = requests.get(f"{self.base_url}/library", timeout=30)
             if resp.status_code == 200:
                 return resp.json()
         except requests.exceptions.RequestException:

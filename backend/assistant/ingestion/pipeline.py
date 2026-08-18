@@ -69,8 +69,14 @@ def load_and_split(pdf_paths: list[Path]) -> list[Document]:
 def ingest_files(pdf_paths: list[Path]) -> int:
     """Embed and persist the given PDFs into Chroma. Returns chunk count added.
 
-    Safe to call repeatedly (e.g. once per uploaded file) — Chroma appends new
-    vectors to the existing persisted collection rather than rebuilding it.
+    Idempotent per filename: clears any existing chunks for each of these
+    exact filenames before adding the fresh ones, so calling this twice for
+    the same file (e.g. a retry, or recovering a filename whose Postgres row
+    or disk copy got out of sync with Chroma some other way) can never leave
+    duplicate/stale vectors sitting alongside the new ones -- api.py's
+    /ingest also rejects a duplicate upload outright, but this is the
+    pipeline's own defense regardless of what called it (CLI, API, or a
+    Temporal activity retry).
     """
     require_openai_api_key()
     if not pdf_paths:
@@ -81,6 +87,8 @@ def ingest_files(pdf_paths: list[Path]) -> int:
         return 0
 
     store = get_vector_store()
+    for pdf_path in pdf_paths:
+        store._collection.delete(where={"source": pdf_path.name})
     store.add_documents(chunks)
     return len(chunks)
 

@@ -16,7 +16,7 @@ ever read from it.
 import sys
 
 from assistant.ingestion.pipeline import ingest_all, ingest_files, load_and_split
-from assistant.ingestion.store import get_vector_store
+from assistant.ingestion.store import delete_document, get_vector_store
 from assistant.openai_key import require_openai_api_key
 from assistant.paths import COLLECTION_NAME, DATA_DIR, PERSIST_DIR
 
@@ -28,6 +28,7 @@ __all__ = [
     "get_vector_store",
     "ingest_files",
     "ingest_all",
+    "delete_document",
 ]
 
 if __name__ == "__main__":

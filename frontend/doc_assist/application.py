@@ -56,9 +56,16 @@ class DocAssistApp:
                 self.conversation.message_view.render_citations(meta.get("sources", []))
 
         session.add_message("assistant", answer_text, meta)
+        if meta and meta.get("title"):
+            # Keeps this in sync with the backend's title on every exchange,
+            # not just the first -- it evolves as the conversation does (see
+            # qa.answer_question's previous_title), all from the same /ask
+            # call. The sidebar picks up the change on the st.rerun() below,
+            # no page reload needed.
+            session.title = meta["title"]
         if is_first_exchange:
-            # This chat just got its title (server-side, in /ask) -- give it
-            # its own ?chat=<id> URL now too, matching the sidebar's History
-            # list picking it up for the first time on this same rerun.
+            # This chat just got its title -- give it its own ?chat=<id> URL
+            # now too, matching the sidebar's History list picking it up
+            # for the first time on this same rerun.
             self.store.publish_current_session_url()
         st.rerun()

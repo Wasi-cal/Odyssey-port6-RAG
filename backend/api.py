@@ -39,7 +39,7 @@ from assistant import config_store, db
 from assistant.orchestration.client import get_temporal_client
 from assistant.orchestration.config import TASK_QUEUE
 from assistant.orchestration.workflows.ingestion_workflow import IngestDocumentsWorkflow
-from ingest import DATA_DIR
+from ingest import DATA_DIR, delete_document
 from rag import answer_question, format_citation
 
 _DATA_DIR_RESOLVED = DATA_DIR.resolve()
@@ -55,6 +55,7 @@ async def lifespan(app: FastAPI):
     db.init_db()
     config_store.seed_defaults()
     yield
+    db.close_db()
 
 
 app = FastAPI(title="Internal Documents Assistant API", lifespan=lifespan)
@@ -83,11 +84,13 @@ class AskResponse(BaseModel):
     sources: list[str]  # pre-formatted via rag.format_citation, same strings app.py already rendered
     num_chunks: int
     latency_ms: float
+    title: str | None = None  # the session's current title, possibly just updated by this call -- None only if nothing changed and there wasn't one already
 
 
 class IngestResponse(BaseModel):
     ingested: list[str]
     chunk_count: int
+    skipped: list[str] = []  # names that already existed -- not (re-)ingested
 
 
 class DocumentInfo(BaseModel):
@@ -181,14 +184,15 @@ def ask(payload: AskRequest) -> AskResponse:
 
     db.ensure_user(payload.user_id)
     db.add_message(payload.session_id, "user", question, None)
-    title = question[:_TITLE_MAX_LEN] + ("…" if len(question) > _TITLE_MAX_LEN else "")
-    db.set_session_title_if_unset(payload.session_id, title)
+    previous_title = db.get_session_title(payload.session_id)
 
     start = time.perf_counter()
     try:
         # Reused as-is: same retrieval, grounding prompt, citation assembly
         # as the CLI (rag.py's __main__) and the previous direct-import UI.
-        result = answer_question(question)
+        # previous_title lets the model evolve the session's title turn by
+        # turn instead of freezing it at the first message (see qa.py).
+        result = answer_question(question, previous_title=previous_title)
     except RuntimeError as e:
         # e.g. OPENAI_API_KEY missing -- rag.py already raises a clear
         # message here; surface it as a clean 500, not a stack trace.
@@ -207,11 +211,31 @@ def ask(payload: AskRequest) -> AskResponse:
     }
     db.add_message(payload.session_id, "assistant", result.answer, meta)
 
+    # result.title comes from the SAME LLM call (see qa.answer_question's
+    # TITLE/ANSWER envelope) -- no second call just to name/rename the chat.
+    # Updated on every exchange, not just the first, so it can track the
+    # conversation as it evolves. Only falls back to a naive truncation of
+    # the question when the LLM wasn't actually invoked (empty
+    # question/store/retrieval, see qa.py) AND there's no previous title yet
+    # to just leave alone -- past the first message, "LLM wasn't invoked"
+    # means genuinely nothing changed, so the title is left untouched rather
+    # than overwritten with a worse guess.
+    if result.title:
+        new_title = result.title
+    elif previous_title is None:
+        new_title = question[:_TITLE_MAX_LEN] + ("…" if len(question) > _TITLE_MAX_LEN else "")
+    else:
+        new_title = None
+
+    if new_title is not None:
+        db.set_session_title(payload.session_id, new_title)
+
     return AskResponse(
         answer=result.answer,
         sources=formatted_sources,
         num_chunks=result.num_chunks_retrieved,
         latency_ms=latency_ms,
+        title=new_title,
     )
 
 
@@ -225,15 +249,34 @@ async def ingest_endpoint(
     db.ensure_user(user_id)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Checked against Postgres (the same source /library reads), not disk --
+    # filenames are the shared identity a document is stored/retrieved under
+    # (one physical file, one set of Chroma chunks, for everyone), so an
+    # existing name is a global collision, not just a this-user-already-has-
+    # it check. Checking Postgres rather than disk keeps this in lockstep
+    # with what the library actually shows: a stray file left on disk by a
+    # prior partial failure, with no matching library row, is *not* treated
+    # as a collision here -- it gets overwritten, which is the correct
+    # recovery, not a false "already exists".
+    existing_filenames = db.list_all_filenames()
+
     saved_paths = []
     filenames = []
+    skipped = []
     for uploaded in files:
-        if not (uploaded.filename or "").lower().endswith(".pdf"):
-            raise HTTPException(status_code=400, detail=f"{uploaded.filename!r} is not a PDF.")
-        dest = DATA_DIR / uploaded.filename
+        name = uploaded.filename or ""
+        if not name.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail=f"{name!r} is not a PDF.")
+        if name in existing_filenames:
+            skipped.append(name)
+            continue
+        dest = DATA_DIR / name
         dest.write_bytes(await uploaded.read())
         saved_paths.append(dest)
-        filenames.append(uploaded.filename)
+        filenames.append(name)
+
+    if not saved_paths:
+        return IngestResponse(ingested=[], chunk_count=0, skipped=skipped)
 
     try:
         # Runs as a Temporal workflow (one activity per file, each
@@ -254,13 +297,16 @@ async def ingest_endpoint(
     for filename, chunk_count in zip(filenames, chunk_counts):
         db.add_document(user_id, filename, chunk_count)
 
-    return IngestResponse(ingested=filenames, chunk_count=sum(chunk_counts))
+    return IngestResponse(ingested=filenames, chunk_count=sum(chunk_counts), skipped=skipped)
 
 
 @app.get("/library", response_model=list[DocumentInfo])
-def get_library(user_id: str) -> list[DocumentInfo]:
-    db.ensure_user(user_id)
-    return [DocumentInfo(**d) for d in db.list_documents(user_id)]
+def get_library() -> list[DocumentInfo]:
+    """Global -- every user sees every document, matching the fact that
+    there's one shared Chroma collection everyone's questions draw from, not
+    one per user (chat sessions/history are the ones scoped per user).
+    """
+    return [DocumentInfo(**d) for d in db.list_documents()]
 
 
 @app.get("/sessions", response_model=list[SessionInfo])
@@ -301,3 +347,33 @@ def get_document(filename: str) -> FileResponse:
         filename=safe_name,
         content_disposition_type="inline",
     )
+
+
+@app.delete("/documents/{filename}")
+def delete_document_endpoint(filename: str) -> dict:
+    """Deletes a document everywhere: its chunks from Chroma, the raw PDF
+    from disk, and its library row (see db.delete_document). Global, not
+    scoped to whichever user clicks delete -- there is one shared vector
+    store collection for everyone, so a document either exists for
+    everyone or, after this, no one.
+
+    Tolerates the three stores (disk, Chroma, Postgres) already being out of
+    sync with each other -- e.g. a prior partial failure, or the Chroma
+    collection having been wiped directly -- rather than requiring all three
+    to agree before doing anything. 404 only if there's genuinely nothing
+    to clean up in any of them; each cleanup step is itself a safe no-op
+    if that particular store never had this filename to begin with.
+    """
+    safe_name = Path(filename).name
+    path = _DATA_DIR_RESOLVED / safe_name
+
+    file_exists = path.is_file() and path.suffix.lower() == ".pdf"
+    if not file_exists and not db.document_exists(safe_name):
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    delete_document(safe_name)  # Chroma chunks -- no-op if there aren't any
+    if file_exists:
+        path.unlink()
+    db.delete_document(safe_name)  # no-op if there's no row
+
+    return {"deleted": safe_name}

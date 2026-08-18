@@ -34,23 +34,46 @@ class Composer:
     def ingest(self, files, store: SessionStore, rerun_when_idle: bool = True) -> None:
         """Upload PDFs to the backend and refresh the library from it.
 
-        Reruns on success (unless rerun_when_idle=False) -- the sidebar
-        (rendered earlier in this same script run, before the composer)
-        would otherwise keep showing the stale library until some later,
-        unrelated interaction triggers the next rerun, which reads as "my
-        upload didn't show up until I refreshed."
+        A name that's already in the library (this user's own, or -- since
+        the document set is shared -- anyone else's) is never re-ingested or
+        overwritten: it's skipped with a warning telling the user to delete
+        the existing one first. Reruns on a clean success (unless
+        rerun_when_idle=False) so the sidebar -- rendered earlier in this
+        same script run, before the composer -- doesn't keep showing the
+        stale library until some later, unrelated interaction; a warning
+        skips that rerun so the message actually stays on screen to be read.
         """
+        already_mine = sorted({f.name for f in files if store.is_ingested(f.name)})
         new_files = [f for f in files if not store.is_ingested(f.name)]
-        if not new_files:
-            return
-        with st.spinner(f"Ingesting {len(new_files)} document(s)…"):
-            result = self.api.ingest(new_files, store.user_id)
-        if result["ok"]:
-            store.refresh_library()
-            if rerun_when_idle:
-                st.rerun()
-        else:
-            st.error(result["error"])
+
+        warnings = []
+        if already_mine:
+            warnings.append(
+                "Already in your library, skipped: "
+                + ", ".join(already_mine)
+                + ". Delete it from the Library first if you want to replace it."
+            )
+
+        if new_files:
+            with st.spinner(f"Ingesting {len(new_files)} document(s)…"):
+                result = self.api.ingest(new_files, store.user_id)
+            if result["ok"]:
+                store.refresh_library()
+                skipped = result.get("skipped") or []
+                if skipped:
+                    warnings.append(
+                        "Already exists, skipped: "
+                        + ", ".join(skipped)
+                        + ". Delete the existing file first, then re-upload."
+                    )
+            else:
+                st.error(result["error"])
+                return
+
+        for message in warnings:
+            st.warning(message)
+        if not warnings and new_files and rerun_when_idle:
+            st.rerun()
 
     def _render_input(self, session_id: str, store: SessionStore) -> tuple[str, list]:
         """Returns (text, files). Uses the built-in attachment button when
