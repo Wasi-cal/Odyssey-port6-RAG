@@ -71,10 +71,11 @@ class ApiClient:
         except requests.exceptions.RequestException:
             return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
 
-    def get_library(self, user_id: str) -> list[dict]:
-        """GET /library. Returns [] on any failure -- an empty library is a
-        safe, silent fallback (the sidebar already handles it), unlike ask/
-        ingest where an error needs to be shown to the user.
+    def get_library(self, user_id: str) -> list[dict] | None:
+        """GET /library. Returns None on any failure -- distinct from a
+        genuinely empty [] -- so SessionStore knows to retry later instead
+        of caching a transient failure (e.g. the API restarting) as if it
+        were a real "no documents yet" for the rest of the browser session.
         """
         try:
             resp = requests.get(f"{self.base_url}/library", params={"user_id": user_id}, timeout=30)
@@ -82,10 +83,10 @@ class ApiClient:
                 return resp.json()
         except requests.exceptions.RequestException:
             pass
-        return []
+        return None
 
-    def get_sessions(self, user_id: str) -> list[dict]:
-        """GET /sessions. Returns [] on any failure, same rationale as
+    def get_sessions(self, user_id: str) -> list[dict] | None:
+        """GET /sessions. Returns None on any failure, same rationale as
         get_library."""
         try:
             resp = requests.get(f"{self.base_url}/sessions", params={"user_id": user_id}, timeout=30)
@@ -93,7 +94,7 @@ class ApiClient:
                 return resp.json()
         except requests.exceptions.RequestException:
             pass
-        return []
+        return None
 
     def create_session(self, user_id: str) -> dict | None:
         """POST /sessions. Returns None on failure -- caller falls back to a

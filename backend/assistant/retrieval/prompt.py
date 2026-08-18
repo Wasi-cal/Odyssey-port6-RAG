@@ -1,26 +1,30 @@
 """Generation model settings + the grounding prompt.
 
 The grounding prompt is the most important piece of this package: it forbids
-outside knowledge, mandates the exact fallback string when the retrieved
-context doesn't contain the answer, requires inline + trailing citations for
-every claim, forbids fabricated citations, requires conflicts between chunks
-to be surfaced rather than silently resolved, tells the model how to read
-table/OCR'd-image chunks, and requires ANSWER COMPLETENESS -- eval (--judge)
-surfaced answer correctness at 0.75 with two answers omitting a material
-qualifying condition or a second, distinct quantity the context actually had
--- so rules 7-8 spell out what "complete" means, and rule 9 (concise) is
-written right after them to make explicit that completeness is not license to
-pad the answer with everything on the page. Rule 7 already named "must
-request N business days in advance" as an example, but eval q3 showed that
-wasn't emphatic enough on its own -- the model answered "20 business days"
-and dropped the attached 5-business-day advance-notice requirement even
-though both facts were retrieved. Rule 7 now calls out PROCEDURAL
-requirements (notice periods, deadlines, approval steps) on
+outside knowledge, mandates one of three exact fallback strings when the
+model can't give a grounded answer (see rule 2), requires inline + trailing
+citations for every claim, forbids fabricated citations, requires conflicts
+between chunks to be surfaced rather than silently resolved, tells the model
+how to read table/OCR'd-image chunks, and requires ANSWER COMPLETENESS --
+eval (--judge) surfaced answer correctness at 0.75 with two answers omitting
+a material qualifying condition or a second, distinct quantity the context
+actually had -- so rules 7-8 spell out what "complete" means, and rule 9
+(concise) is written right after them to make explicit that completeness is
+not license to pad the answer with everything on the page. Rule 7 already
+named "must request N business days in advance" as an example, but eval q3
+showed that wasn't emphatic enough on its own -- the model answered "20
+business days" and dropped the attached 5-business-day advance-notice
+requirement even though both facts were retrieved. Rule 7 now calls out
+PROCEDURAL requirements (notice periods, deadlines, approval steps) on
 entitlement/benefit/limit questions specifically, with that exact failure as
 its worked example, bounded by the same don't-pad-with-tangential-clauses
 instruction as everything else in it. A wrong confident answer is worse than
-an honest miss for an HR/SOP assistant, so rule 2 (the "I don't know" path)
-is written to be the easiest, most explicit path to take.
+an honest miss for an HR/SOP assistant, so rule 2 is written to be the
+easiest, most explicit path to take -- and it now branches into three exact
+responses instead of one, so a genuinely unclear question, an off-topic one,
+and a legitimate-but-uncovered one each get a reply suited to it (the last
+one pointing the user at a human) rather than the same flat "I don't know"
+regardless of which of those it actually was.
 """
 
 GENERATION_MODEL = "gpt-4o-mini"
@@ -30,7 +34,27 @@ GENERATION_MODEL = "gpt-4o-mini"
 # invite paraphrasing that drifts from what the source actually says.
 GENERATION_TEMPERATURE = 0.0
 
-FALLBACK_ANSWER = "I don't know based on the provided documents."
+# Only used to build the FALLBACK_UNANSWERED default text below -- change
+# the escalation address by editing that config value directly in Postgres
+# (config_settings, category='generation', key='fallback_unanswered'), not
+# by editing this constant, which only ever seeds the default on first
+# startup (see config_store.seed_defaults).
+HR_ESCALATION_EMAIL = "wasiullahrafeeq.s@gmail.com"
+
+FALLBACK_UNCLEAR = (
+    "I'm not quite sure what you're asking -- could you rephrase or add a "
+    "bit more detail? That'll help me point you to the right policy."
+)
+
+FALLBACK_UNRELATED = (
+    "That doesn't look related to our internal HR policies, SOPs, or "
+    "onboarding documents -- I can only help with questions in that scope."
+)
+
+FALLBACK_UNANSWERED = (
+    "I couldn't find an answer to that in the available documents. For help "
+    f"with this, please reach out to HR at {HR_ESCALATION_EMAIL}."
+)
 
 SYSTEM_PROMPT = """You are an internal-documents assistant. Answer the user's \
 question using ONLY the context chunks below, retrieved from the company's \
@@ -43,12 +67,20 @@ Never use outside knowledge, training data, or assumptions -- not even \
 something you personally believe is true. If a fact isn't in the context \
 below, you don't know it for the purposes of this answer.
 
-2. If the context doesn't contain enough information to answer, respond \
-with EXACTLY this sentence and NOTHING else -- no citations, no partial \
-answer, no explanation: "{fallback_answer}" \
-When genuinely unsure whether the context supports an answer, take this \
-path rather than guessing -- a confident wrong answer is worse than an \
-honest "I don't know" for this tool.
+2. When you cannot give a grounded answer, pick EXACTLY ONE of the three \
+responses below instead of guessing, and output NOTHING else -- no \
+citations, no partial answer, no explanation:
+   a) The question itself is unclear, ambiguous, or too vague to know what's \
+actually being asked: respond with EXACTLY "{fallback_unclear}"
+   b) The question is clearly unrelated to internal HR policies, SOPs, \
+manuals, or onboarding docs (general knowledge, small talk, nonsense, or \
+otherwise out of scope for this tool): respond with EXACTLY \
+"{fallback_unrelated}"
+   c) The question is clear and legitimately in scope, but the context \
+below simply doesn't contain the answer: respond with EXACTLY \
+"{fallback_unanswered}"
+A confident wrong answer is worse than picking one of these three honestly \
+-- when genuinely unsure which applies, prefer (c) over guessing.
 
 3. Cite as you go, using the numbered labels ONLY. Every chunk below is \
 prefixed with a number in brackets, e.g. "[1]", "[2]". Immediately after \

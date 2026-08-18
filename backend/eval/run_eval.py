@@ -39,12 +39,20 @@ from langchain_openai import ChatOpenAI  # noqa: E402  (after sys.path insert)
 
 from rag import (  # noqa: E402
     K,
-    FALLBACK_ANSWER,
+    FALLBACK_UNANSWERED,
+    FALLBACK_UNCLEAR,
+    FALLBACK_UNRELATED,
     answer_question,
     format_citation,
     get_retriever,
     store_is_empty,
 )
+
+# A correct refusal can land on any of the three fallback paths (rule 2 in
+# retrieval/prompt.py) -- an out_of_scope golden question isn't labeled with
+# which one it should trigger, so any of the three counts as "didn't
+# hallucinate", which is what this eval is actually checking for.
+_FALLBACK_RESPONSES = {FALLBACK_UNCLEAR, FALLBACK_UNRELATED, FALLBACK_UNANSWERED}
 
 # --------------------------------------------------------------------------
 # Constants
@@ -327,7 +335,7 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
             row["fact_retrieval_gap"] = ""
 
     else:  # out_of_scope
-        row["refusal_correct"] = rag_result.answer.strip() == FALLBACK_ANSWER
+        row["refusal_correct"] = rag_result.answer.strip() in _FALLBACK_RESPONSES
 
     return row
 

@@ -32,10 +32,15 @@ class SessionStore:
             st.session_state.sessions = {}
             st.session_state.session_order = []
             st.session_state.current_session_id = None
+            st.session_state.sessions_loaded = False
+
+        if not st.session_state.sessions_loaded:
             self._load_sessions_from_backend()
 
-        if "library" not in st.session_state:
-            st.session_state.library = self.api.get_library(user_id)
+        if st.session_state.get("library") is None:
+            fetched = self.api.get_library(user_id)
+            if fetched is not None:
+                st.session_state.library = fetched
 
         if "pending_question" not in st.session_state:
             st.session_state.pending_question = None
@@ -45,11 +50,20 @@ class SessionStore:
 
     # -- sessions --------------------------------------------------------
     def _load_sessions_from_backend(self) -> None:
-        """Most-recently-created first, matching GET /sessions' ordering."""
+        """Most-recently-created first, matching GET /sessions' ordering.
+
+        A None result (request failed -- e.g. the API restarting) leaves
+        sessions_loaded False so the next rerun retries, instead of a
+        transient failure getting cached as "you have no past chats" for
+        the rest of the browser session.
+        """
         rows = self.api.get_sessions(self.user_id)
+        if rows is None:
+            return
         for row in rows:
             st.session_state.sessions[row["id"]] = ChatSession(id=row["id"], title=row["title"])
             st.session_state.session_order.append(row["id"])
+        st.session_state.sessions_loaded = True
 
     def _resolve_initial_session(self) -> None:
         """A URL of ?chat=<id> reopens that specific past chat; anything else
@@ -121,13 +135,19 @@ class SessionStore:
     # -- library -----------------------------------------------------------
     @property
     def library(self) -> list[dict]:
-        return st.session_state.library
+        return st.session_state.get("library") or []
 
     def is_ingested(self, filename: str) -> bool:
-        return any(entry["name"] == filename for entry in st.session_state.library)
+        return any(entry["name"] == filename for entry in self.library)
 
     def refresh_library(self) -> None:
-        st.session_state.library = self.api.get_library(self.user_id)
+        """A None result (request failed) leaves the existing library alone
+        -- a transient failure should never wipe out a library that was
+        already showing something real.
+        """
+        fetched = self.api.get_library(self.user_id)
+        if fetched is not None:
+            st.session_state.library = fetched
 
     # -- pending question (set by a suggestion-chip click) ------------------
     @property

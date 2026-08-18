@@ -70,7 +70,9 @@ def seed_defaults() -> None:
     """
     from .retrieval.config import K, SEARCH_TYPE
     from .retrieval.prompt import (
-        FALLBACK_ANSWER,
+        FALLBACK_UNANSWERED,
+        FALLBACK_UNCLEAR,
+        FALLBACK_UNRELATED,
         GENERATION_MODEL,
         GENERATION_TEMPERATURE,
         SYSTEM_PROMPT,
@@ -86,9 +88,24 @@ def seed_defaults() -> None:
             },
             {
                 "category": "generation",
-                "key": "fallback_answer",
-                "value": FALLBACK_ANSWER,
-                "description": "Exact string returned when nothing relevant is retrieved.",
+                "key": "fallback_unclear",
+                "value": FALLBACK_UNCLEAR,
+                "description": "Returned when the question itself is too unclear/ambiguous to answer.",
+            },
+            {
+                "category": "generation",
+                "key": "fallback_unrelated",
+                "value": FALLBACK_UNRELATED,
+                "description": "Returned when the question is clearly outside the document set's scope.",
+            },
+            {
+                "category": "generation",
+                "key": "fallback_unanswered",
+                "value": FALLBACK_UNANSWERED,
+                "description": (
+                    "Returned when the question is in scope but not covered by the "
+                    "documents -- includes the HR escalation email, edit it here to change that address."
+                ),
             },
             {
                 "category": "generation",

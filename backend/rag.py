@@ -23,7 +23,9 @@ from assistant.openai_key import require_openai_api_key
 from assistant.retrieval.citations import format_citation
 from assistant.retrieval.config import K, SEARCH_TYPE
 from assistant.retrieval.prompt import (
-    FALLBACK_ANSWER,
+    FALLBACK_UNANSWERED,
+    FALLBACK_UNCLEAR,
+    FALLBACK_UNRELATED,
     GENERATION_MODEL,
     GENERATION_TEMPERATURE,
     SYSTEM_PROMPT,
@@ -36,7 +38,9 @@ __all__ = [
     "SEARCH_TYPE",
     "GENERATION_MODEL",
     "GENERATION_TEMPERATURE",
-    "FALLBACK_ANSWER",
+    "FALLBACK_UNCLEAR",
+    "FALLBACK_UNRELATED",
+    "FALLBACK_UNANSWERED",
     "SYSTEM_PROMPT",
     "RagResult",
     "get_retriever",
