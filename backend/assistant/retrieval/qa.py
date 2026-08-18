@@ -8,12 +8,15 @@ from dataclasses import dataclass, field
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from openai import OpenAI
 
 from .. import config_store
 from ..openai_key import require_openai_api_key
 from ..paths import DATA_DIR
 from .citations import dedupe_sources, extract_cited_docs, format_context
 from .prompt import (
+    FALLBACK_ABUSE,
+    FALLBACK_GIBBERISH,
     FALLBACK_GREETING,
     FALLBACK_HANDOFF,
     FALLBACK_UNANSWERED,
@@ -21,7 +24,6 @@ from .prompt import (
     FALLBACK_UNRELATED,
     GENERATION_MODEL,
     GENERATION_TEMPERATURE,
-    LIST_DOCUMENTS_MARKER,
     SYSTEM_PROMPT,
 )
 from .store import get_retriever, store_is_empty
@@ -76,17 +78,76 @@ def _list_documents_answer() -> str:
     return f"I have access to the following documents:\n\n{listing}"
 
 
+# Deliberately NOT an LLM classification (see prompt.py's docstring for why:
+# gpt-4o-mini kept pattern-matching "what leave policies do you have" onto
+# this despite two rounds of explicit prompt instructions to the contrary).
+# This only needs to catch questions about the file/document system itself
+# -- keep it narrow. A question that happens to also name a policy topic
+# (e.g. "what leave documents do you have") is rare enough, and still
+# fundamentally a documents question, that matching it here is fine.
+_LIST_DOCUMENTS_PHRASES = (
+    "what documents",
+    "what files",
+    "which documents",
+    "which files",
+    "how many documents",
+    "how many files",
+    "how many pdfs",
+    "what pdfs",
+    "which pdfs",
+    "list documents",
+    "list files",
+    "list the documents",
+    "list the files",
+    "your knowledge base",
+    "in your library",
+    "documents do you have",
+    "files do you have",
+)
+
+
+def _is_list_documents_question(question: str) -> bool:
+    q = question.lower()
+    return any(phrase in q for phrase in _LIST_DOCUMENTS_PHRASES)
+
+
+def _is_abusive(question: str) -> bool:
+    """OpenAI's Moderation API, not the generation model's own judgment --
+    a purpose-built, separately-trained classifier for harassment/hate/
+    sexual/violent content is meaningfully more reliable against adversarial
+    input than asking gpt-4o-mini to police itself in the same prompt that
+    also has to produce the actual answer. It's a small, fast, cheap
+    classification call, not a second generation call.
+
+    Fails OPEN (returns False -- lets the question through) if the
+    moderation call itself errors: for this internal HR tool, a real
+    question failing because a third-party classifier hiccuped is worse
+    than the rare abusive message getting through to a fixed, harmless
+    refusal path anyway once it reaches rule 2 or generation.
+    """
+    try:
+        result = OpenAI().moderations.create(input=question)
+        return bool(result.results[0].flagged)
+    except Exception:
+        return False
+
+
 def answer_question(question: str, previous_title: str | None = None) -> RagResult:
     """Retrieve relevant chunks and generate a grounded, cited answer.
 
     Returns one of several fixed responses (with empty sources) instead of a
-    grounded content answer when one isn't appropriate: a greeting/small talk
-    gets a friendly intro, a request for a human gets pointed at HR, "what
-    documents do you have" gets the real current library, an unclear question
-    asks the user to rephrase, an unrelated one says so, and a clear-but-
-    uncovered one points the user at HR to escalate. The empty-store and
-    nothing-retrieved cases below use the last of those, since there's no
-    context for the LLM to classify against.
+    grounded content answer when one isn't appropriate. Two of these are
+    caught before the LLM is ever called: abusive/harassing input (see
+    _is_abusive, an OpenAI Moderation API call) and "what documents do you
+    have" (see _is_list_documents_question, a plain keyword check -- gets
+    the real current library). The rest are the generation model's own
+    judgment, made in the same call that also tries to answer: a
+    greeting/small talk gets a friendly intro, a request for a human gets
+    pointed at HR, gibberish gets asked to be retyped, a real-but-vague
+    question asks the user to rephrase, an unrelated one says so, and a
+    clear-but-uncovered one points the user at HR to escalate. The
+    empty-store and nothing-retrieved cases below use the last of those,
+    since there's no context for the LLM to classify against.
 
     The system prompt and these fixed strings, plus the generation
     model/temperature, are read fresh from config_store on every call (not
@@ -113,20 +174,25 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
     system_prompt = config_store.get("generation", "system_prompt", SYSTEM_PROMPT)
     fallback_greeting = config_store.get("generation", "fallback_greeting", FALLBACK_GREETING)
     fallback_handoff = config_store.get("generation", "fallback_handoff", FALLBACK_HANDOFF)
-    list_documents_marker = config_store.get(
-        "generation", "list_documents_marker", LIST_DOCUMENTS_MARKER
-    )
     fallback_unclear = config_store.get("generation", "fallback_unclear", FALLBACK_UNCLEAR)
+    fallback_gibberish = config_store.get("generation", "fallback_gibberish", FALLBACK_GIBBERISH)
     fallback_unrelated = config_store.get("generation", "fallback_unrelated", FALLBACK_UNRELATED)
     fallback_unanswered = config_store.get(
         "generation", "fallback_unanswered", FALLBACK_UNANSWERED
     )
+    fallback_abuse = config_store.get("generation", "fallback_abuse", FALLBACK_ABUSE)
     generation_model = config_store.get("generation", "model", GENERATION_MODEL)
     generation_temperature = config_store.get("generation", "temperature", GENERATION_TEMPERATURE)
 
     question = (question or "").strip()
     if not question:
         return RagResult(answer="Please enter a question.", sources=[], num_chunks_retrieved=0)
+
+    if _is_abusive(question):
+        return RagResult(answer=fallback_abuse, sources=[], num_chunks_retrieved=0)
+
+    if _is_list_documents_question(question):
+        return RagResult(answer=_list_documents_answer(), sources=[], num_chunks_retrieved=0)
 
     if store_is_empty():
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
@@ -157,18 +223,13 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
             "previous_title": previous_title or _NO_PREVIOUS_TITLE,
             "fallback_greeting": fallback_greeting,
             "fallback_handoff": fallback_handoff,
-            "list_documents_marker": list_documents_marker,
             "fallback_unclear": fallback_unclear,
+            "fallback_gibberish": fallback_gibberish,
             "fallback_unrelated": fallback_unrelated,
             "fallback_unanswered": fallback_unanswered,
         }
     )
     title, answer_text = _split_title_and_answer(response.content)
-
-    if answer_text == list_documents_marker:
-        return RagResult(
-            answer=_list_documents_answer(), sources=[], num_chunks_retrieved=len(docs), title=title
-        )
 
     # If the model correctly declined to answer (any of the fixed-response
     # paths), don't attach sources that would falsely imply the documents
@@ -176,6 +237,7 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
     if answer_text in (
         fallback_greeting,
         fallback_handoff,
+        fallback_gibberish,
         fallback_unclear,
         fallback_unrelated,
         fallback_unanswered,

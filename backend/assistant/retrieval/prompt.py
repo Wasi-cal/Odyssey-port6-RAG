@@ -24,12 +24,35 @@ Rule 2 started as a single "I don't know" fallback, then grew a 3-way split
 (unclear / unrelated / uncovered-but-in-scope). It now also carves greetings
 and human-handoff requests out of "unrelated" -- both were landing on the
 same blunt "that's not related" message, which reads as rude for "hi" and
-unhelpful for "can I talk to someone else" -- and adds a documents-listing
-branch so "what documents do you have" gets the real current library instead
-of being treated as an unanswerable content question. A wrong confident
-answer is worse than an honest miss for an HR/SOP assistant, so rule 2 is
-still written to be the easiest, most explicit path to take -- there's just
-more than one honest path now, each suited to what was actually asked.
+unhelpful for "can I talk to someone else." A wrong confident answer is
+worse than an honest miss for an HR/SOP assistant, so rule 2 is still
+written to be the easiest, most explicit path to take -- there's just more
+than one honest path now, each suited to what was actually asked.
+
+"What documents do you have" is deliberately NOT one of rule 2's branches --
+an earlier version tried a model-classified branch for it (respond with a
+fixed marker, qa.py substitutes the real library), but gpt-4o-mini kept
+pattern-matching questions like "what leave policies do you have" onto it
+purely from the surface shape "what X do you have," regardless of how
+explicitly the rule said a named policy topic disqualifies it -- two
+rounds of tightening the wording didn't move it at all. That's a narrow,
+mechanically-recognizable question (does it name the file/document system
+itself, with no policy topic at all?) that doesn't need an LLM's judgment,
+so it's now a plain keyword check in qa.py, before the LLM is ever called --
+see _is_list_documents_question there.
+
+Rule 2 also splits gibberish (no real words/intent at all) out from unclear
+(a real but vague question) -- they read very differently to a user ("try
+typing that again" vs. "could you rephrase") even though both are
+non-answers. Actual abuse/harassment is handled entirely separately, before
+this prompt is even sent -- see qa._is_abusive -- since that's a job for a
+purpose-built moderation classifier, not this generation model's own
+judgment call.
+
+Rule 7 also covers broad/umbrella terms (e.g. "leave policy" spanning
+parental, sick, vacation, and more): answer with every distinct policy of
+that kind found in the context, not just whichever one retrieval ranked
+first.
 
 The TITLE/ANSWER envelope wrapping all of this exists so the chat session
 gets a meaningful, evolving title (e.g. "PTO Rollover Policy", broadening to
@@ -68,17 +91,23 @@ FALLBACK_HANDOFF = (
     f"to HR at {HR_ESCALATION_EMAIL}."
 )
 
-# Never shown to the user -- an internal signal the model outputs so
-# retrieval/qa.py can recognize "list the documents" and substitute the
-# real, current library instead of a canned sentence (the model has no
-# reliable way to know the actual current filenames on its own). If you
-# rewrite system_prompt from scratch, keep a "{list_documents_marker}"
-# placeholder in it or this stops working.
-LIST_DOCUMENTS_MARKER = "__LIST_DOCUMENTS__"
-
 FALLBACK_UNCLEAR = (
     "I'm not quite sure what you're asking -- could you rephrase or add a "
     "bit more detail? That'll help me point you to the right policy."
+)
+
+FALLBACK_GIBBERISH = (
+    "That doesn't look like a real question -- could you try typing it "
+    "again?"
+)
+
+# Blocks the request before it ever reaches retrieval or generation (see
+# qa._is_abusive, an OpenAI Moderation API call) -- distinct from
+# FALLBACK_UNCLEAR/FALLBACK_GIBBERISH, which are the *generation* model's
+# own judgment calls on an otherwise-legitimate attempt at a question.
+FALLBACK_ABUSE = (
+    "I can't help with that. Please keep questions professional and "
+    "related to our HR policies and documents."
 )
 
 FALLBACK_UNRELATED = (
@@ -134,12 +163,14 @@ else -- no citations, no partial answer, no explanation:
 "{fallback_greeting}"
    b) A request to talk to a person, human, agent, or "someone else" \
 instead of this assistant: respond with EXACTLY "{fallback_handoff}"
-   c) A question about what documents, files, or policies this assistant \
-has access to -- about the library itself, not about specific policy \
-content (e.g. "what documents do you have", "what can you help me with"): \
-respond with EXACTLY "{list_documents_marker}" and nothing else.
-   d) The question itself is unclear, ambiguous, or too vague to know what's \
-actually being asked: respond with EXACTLY "{fallback_unclear}"
+   c) The question itself is unclear, ambiguous, or too vague to know what's \
+actually being asked, but is still made of real words expressing SOME real \
+intent (e.g. "what about the leave thing"): respond with EXACTLY \
+"{fallback_unclear}"
+   d) The input isn't a real question at all -- random characters, \
+keyboard mashing, or no discernible words or intent whatsoever (different \
+from (c): this is about input that doesn't express ANY intent, not a real \
+but vague one): respond with EXACTLY "{fallback_gibberish}"
    e) The question is clearly unrelated to internal HR policies, SOPs, \
 manuals, or onboarding docs (general knowledge, nonsense, or otherwise out \
 of scope for this tool): respond with EXACTLY "{fallback_unrelated}"
@@ -147,7 +178,7 @@ of scope for this tool): respond with EXACTLY "{fallback_unrelated}"
 below simply doesn't contain the answer: respond with EXACTLY \
 "{fallback_unanswered}"
 A confident wrong answer is worse than picking one of these honestly -- \
-when genuinely unsure which of (d)/(e)/(f) applies, prefer (f) over \
+when genuinely unsure which of (c)/(e)/(f) applies, prefer (f) over \
 guessing.
 
 3. Cite as you go, using the numbered labels ONLY. Every chunk below is \
@@ -201,6 +232,16 @@ both to actually act on the entitlement. Only include a procedural \
 requirement that's directly tied to what was asked; don't append every \
 tangential clause on the page just because it's nearby. An answer that \
 gives a number but omits a directly-attached condition is incomplete.
+
+Broad or umbrella terms deserve broad coverage, the same way a multi-part \
+question does. If the question names a general category that could cover \
+several distinct policies (e.g. "leave policy" can mean parental leave, \
+sick leave, vacation/PTO, bereavement leave, jury duty, and more), don't \
+stop at the first matching policy in the context -- identify every \
+DISTINCT policy of that kind that appears below and summarize each one \
+clearly, the same as if the user had asked about each by name. Only cover \
+the ones actually present in the context; don't claim there are no others \
+if you simply weren't given them.
 
 8. Disambiguate related quantities. When a question involves more than one \
 related number (e.g. total leave eligibility vs. how much of it is paid; a \

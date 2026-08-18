@@ -299,12 +299,19 @@ html, body, .stApp,
     line-height: 1.6; text-align: left;
 }
 
+/* Citations are the one link inside a message that's meant to be clicked
+   (opens the source PDF at the cited page) -- everything else in a bubble
+   stays inert, but this is deliberately excluded from that rule. */
 [class*="st-key-bubble-user-"] a,
-[class*="st-key-bubble-assistant-"] a,
-.citation-line a {
+[class*="st-key-bubble-assistant-"] a {
     color: inherit !important; text-decoration: none !important;
     pointer-events: none; cursor: default;
 }
+.citation-line a {
+    color: #9297A6; text-decoration: underline; text-decoration-color: #D8DAE2;
+    text-underline-offset: 2px; cursor: pointer;
+}
+.citation-line a:hover { color: #171B2E; text-decoration-color: currentColor; }
 
 /* Explicit spacers — see the note above the msgrow rules */
 .top-spacer { height: 0.75rem; }

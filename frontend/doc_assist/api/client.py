@@ -28,6 +28,9 @@ class ApiClient:
             if resp.status_code == 200:
                 data = resp.json()
                 meta = {
+                    # Each item is {"label": str, "filename": str, "page": int|None}
+                    # (see api.SourceInfo) -- chat.py's render_citations turns
+                    # these into links to GET /documents/{filename}#page=N.
                     "sources": data.get("sources", []),
                     "num_chunks": data.get("num_chunks"),
                     "latency_ms": data.get("latency_ms"),

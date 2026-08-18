@@ -70,6 +70,8 @@ def seed_defaults() -> None:
     """
     from .retrieval.config import K, SEARCH_TYPE
     from .retrieval.prompt import (
+        FALLBACK_ABUSE,
+        FALLBACK_GIBBERISH,
         FALLBACK_GREETING,
         FALLBACK_HANDOFF,
         FALLBACK_UNANSWERED,
@@ -77,7 +79,6 @@ def seed_defaults() -> None:
         FALLBACK_UNRELATED,
         GENERATION_MODEL,
         GENERATION_TEMPERATURE,
-        LIST_DOCUMENTS_MARKER,
         SYSTEM_PROMPT,
     )
 
@@ -103,18 +104,24 @@ def seed_defaults() -> None:
             },
             {
                 "category": "generation",
-                "key": "list_documents_marker",
-                "value": LIST_DOCUMENTS_MARKER,
-                "description": (
-                    "Internal signal (never shown to users) the model outputs for "
-                    "'what documents do you have' -- qa.py substitutes the real library for it."
-                ),
-            },
-            {
-                "category": "generation",
                 "key": "fallback_unclear",
                 "value": FALLBACK_UNCLEAR,
                 "description": "Returned when the question itself is too unclear/ambiguous to answer.",
+            },
+            {
+                "category": "generation",
+                "key": "fallback_gibberish",
+                "value": FALLBACK_GIBBERISH,
+                "description": "Returned when the input has no discernible words or intent at all.",
+            },
+            {
+                "category": "generation",
+                "key": "fallback_abuse",
+                "value": FALLBACK_ABUSE,
+                "description": (
+                    "Returned when OpenAI's Moderation API flags the input -- this one never "
+                    "reaches the LLM at all, so editing it takes effect without any generation call."
+                ),
             },
             {
                 "category": "generation",

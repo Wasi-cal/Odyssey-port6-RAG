@@ -5,6 +5,11 @@ langchain-community>=0.3.0,<0.4.0
 langchain-chroma>=0.1.4,<0.2.0
 langchain-text-splitters>=0.3.0,<0.4.0
 
+# Raw OpenAI SDK (already an indirect dep of langchain-openai, pinned
+# explicitly since retrieval/qa.py now calls the Moderation endpoint
+# directly -- input-abuse guardrail, not the chat/generation path).
+openai>=1.40.0,<2.0.0
+
 # Vector store
 chromadb>=0.5.0,<0.6.0
 # Pinned to avoid a known chromadb 0.5.x / posthog telemetry signature

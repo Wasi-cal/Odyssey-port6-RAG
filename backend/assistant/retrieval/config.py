@@ -1,14 +1,18 @@
 """Retrieval tuning constants."""
 
-# k=6: bumped up from the original k=4 now that ingestion chunks are sized in
-# TOKENS (~200 tokens each, see ingestion/chunking.py's CHUNK_SIZE) rather
-# than the old ~800-character chunks -- each chunk now covers noticeably less
-# ground, so a slightly higher k keeps total retrieved coverage roughly
-# comparable to before. Still comfortably inside the ~4-8 range that's sane
-# for a stuffed gpt-4o-mini context: 6 chunks x (~200 content tokens + a
-# short header) is a few hundred tokens, nowhere near the model's context
-# limit.
-K = 6
+# k=10: bumped from 6 after an umbrella-style question ("what is the leave
+# policy" -- an umbrella term spanning parental/sick/vacation leave, each its
+# own section) only retrieved 2 of the 3 relevant sections at k=6, so the
+# answer silently omitted vacation entirely. k=10 pulled in all 3 in testing,
+# and rule 7 in prompt.py now also explicitly tells the model to enumerate
+# every distinct policy an umbrella term could cover, not just the first
+# match -- the two fixes address different failure modes (retrieval missing
+# a chunk vs. the model stopping early even when it has the chunk) and both
+# were needed. Still nowhere near the model's context limit: 10 chunks x
+# (~200 content tokens + a short header) is at most a couple thousand
+# tokens. Configurable live via config_settings (category='retrieval',
+# key='k') without a redeploy -- see assistant/config_store.py.
+K = 10
 
 # search_type="mmr" (Maximal Marginal Relevance) instead of plain similarity:
 # plain top-k similarity search on a well-populated store tends to return

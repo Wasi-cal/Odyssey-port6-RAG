@@ -1,9 +1,11 @@
 """Rendering for a single message bubble and the full conversation list."""
 
 import html
+import urllib.parse
 
 import streamlit as st
 
+from ...config import PUBLIC_API_BASE_URL
 from ...domain.models import ChatSession, parse_citation
 
 
@@ -18,13 +20,36 @@ class MessageView:
             return
         lines = []
         for src in sources:
+            # New shape (api.SourceInfo): {"label", "filename", "page"}.
+            # Older stored messages (from before citations linked to the
+            # PDF) have a bare string instead -- render those the same as
+            # always, just without a link, rather than breaking on reload.
+            if isinstance(src, dict):
+                label = src.get("label", "")
+                filename = src.get("filename")
+                page = src.get("page")
+            else:
+                label, filename, page = str(src), None, None
+
             try:
-                doc, heading, page_label = parse_citation(src)
+                doc, heading, page_label = parse_citation(label)
             except Exception:
-                doc, heading, page_label = str(src), "", ""
+                doc, heading, page_label = label, "", ""
             # Document, then the page it's on, then the heading it came from.
             line = " · ".join(part for part in (doc, page_label, heading) if part)
-            lines.append(html.escape(line))
+            escaped = html.escape(line)
+
+            if filename and page:
+                # #page=N is the standard PDF-open-to-page fragment, honored
+                # by browsers' built-in PDF viewers -- clicking a citation
+                # opens the actual source document at the cited page.
+                url = f"{PUBLIC_API_BASE_URL}/documents/{urllib.parse.quote(filename)}#page={page}"
+                lines.append(
+                    f'<a class="citation-link" href="{html.escape(url)}" '
+                    f'target="_blank" rel="noopener">{escaped}</a>'
+                )
+            else:
+                lines.append(escaped)
         st.markdown(
             f'<div class="citation-line">{"<br>".join(lines)}</div>',
             unsafe_allow_html=True,

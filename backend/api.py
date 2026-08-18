@@ -79,9 +79,15 @@ class AskRequest(BaseModel):
     user_id: str
 
 
+class SourceInfo(BaseModel):
+    label: str  # pre-formatted via rag.format_citation, e.g. "Doc → Section, p.N"
+    filename: str  # the real file on disk -- GET /documents/{filename} serves it
+    page: int | None = None  # for a #page=N link fragment; None if the chunk's page wasn't known
+
+
 class AskResponse(BaseModel):
     answer: str
-    sources: list[str]  # pre-formatted via rag.format_citation, same strings app.py already rendered
+    sources: list[SourceInfo]
     num_chunks: int
     latency_ms: float
     title: str | None = None  # the session's current title, possibly just updated by this call -- None only if nothing changed and there wasn't one already
@@ -199,13 +205,20 @@ def ask(payload: AskRequest) -> AskResponse:
         raise HTTPException(status_code=500, detail=str(e)) from e
     latency_ms = (time.perf_counter() - start) * 1000
 
-    formatted_sources = [format_citation(s) for s in result.sources]
+    formatted_sources = [
+        SourceInfo(
+            label=format_citation(s),
+            filename=s["source"],
+            page=s["page"] if isinstance(s["page"], int) else None,
+        )
+        for s in result.sources
+    ]
     raw_source_filenames = [s["source"] for s in result.sources]
 
     _log_query(question, result.num_chunks_retrieved, latency_ms, raw_source_filenames)
 
     meta = {
-        "sources": formatted_sources,
+        "sources": [s.model_dump() for s in formatted_sources],
         "num_chunks": result.num_chunks_retrieved,
         "latency_ms": latency_ms,
     }

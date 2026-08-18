@@ -39,6 +39,7 @@ from langchain_openai import ChatOpenAI  # noqa: E402  (after sys.path insert)
 
 from rag import (  # noqa: E402
     K,
+    FALLBACK_GIBBERISH,
     FALLBACK_GREETING,
     FALLBACK_HANDOFF,
     FALLBACK_UNANSWERED,
@@ -58,6 +59,7 @@ _FALLBACK_RESPONSES = {
     FALLBACK_GREETING,
     FALLBACK_HANDOFF,
     FALLBACK_UNCLEAR,
+    FALLBACK_GIBBERISH,
     FALLBACK_UNRELATED,
     FALLBACK_UNANSWERED,
 }
