@@ -1,11 +1,19 @@
 """
 api.py — thin FastAPI serving layer in front of the existing RAG pipeline.
 
-This file is purely a transport layer: every endpoint imports and calls
-rag.answer_question() / rag.format_citation() / ingest.ingest_files() AS-IS.
-It never reimplements retrieval, chunking, grounding, citation, or
-persistence logic -- all of that behavior lives in rag.py / ingest.py,
+This file is purely a transport layer: it never reimplements retrieval,
+chunking, grounding, citation, or persistence logic -- all of that behavior
+lives in rag.py / ingest.py (and the assistant/ package underneath them),
 completely untouched by anything here.
+
+/ask calls rag.answer_question() directly -- a single fast request/response
+with nothing worth retrying independently. /ingest instead starts the
+Temporal workflow defined in assistant/orchestration/ (one activity per
+uploaded file, each retried independently) and awaits its result -- durable
+against a transient OpenAI rate-limit or a worker crash mid-batch, with the
+exact same {ingested, chunk_count} response contract as a direct call would
+have had. Requires a Temporal server + `uv run worker.py` running alongside
+this API; see assistant/orchestration/__init__.py.
 
 Run with:
     uvicorn api:app --reload
@@ -18,13 +26,17 @@ not this transport layer.
 
 import json
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from ingest import DATA_DIR, ingest_files
+from assistant.orchestration.client import get_temporal_client
+from assistant.orchestration.config import TASK_QUEUE
+from assistant.orchestration.workflows.ingestion_workflow import IngestDocumentsWorkflow
+from ingest import DATA_DIR
 from rag import answer_question, format_citation
 
 app = FastAPI(title="Internal Documents Assistant API")
@@ -61,6 +73,21 @@ class IngestResponse(BaseModel):
 # --------------------------------------------------------------------------
 # Query log -- best-effort, seeds a future monitoring dashboard
 # --------------------------------------------------------------------------
+
+
+def _unwrap_temporal_error(e: Exception) -> str:
+    """Temporal wraps an activity's exception in its own error types
+    (WorkflowFailureError -> ActivityError -> ApplicationError, ...) --
+    unwrap down to the innermost message so a clear error (e.g. a missing
+    OPENAI_API_KEY) still surfaces as a clean, readable string, the same as
+    it did before ingestion ran inside a workflow, not as an opaque
+    Temporal wrapper type."""
+    cause = e
+    seen = set()
+    while getattr(cause, "cause", None) is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        cause = cause.cause
+    return str(cause) or str(e)
 
 
 def _log_query(question: str, num_chunks: int, latency_ms: float, cited_sources: list[str]) -> None:
@@ -138,9 +165,21 @@ async def ingest_endpoint(files: list[UploadFile] = File(...)) -> IngestResponse
         filenames.append(uploaded.filename)
 
     try:
-        # Reused as-is: same chunking/embedding pipeline ingest.py's CLI uses.
-        chunk_count = ingest_files(saved_paths)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # Runs as a Temporal workflow (one activity per file, each
+        # independently retried) instead of calling ingest_files() directly
+        # -- same underlying pipeline, now durable against a transient
+        # OpenAI rate-limit or a worker crash mid-batch. See
+        # assistant/orchestration/ for the workflow/activity definitions.
+        # The request/response contract here is unchanged: this still
+        # returns {ingested, chunk_count} synchronously.
+        client = await get_temporal_client()
+        chunk_count = await client.execute_workflow(
+            IngestDocumentsWorkflow.run,
+            [str(p) for p in saved_paths],
+            id=f"ingest-{uuid.uuid4()}",
+            task_queue=TASK_QUEUE,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_unwrap_temporal_error(e)) from e
 
     return IngestResponse(ingested=filenames, chunk_count=chunk_count)

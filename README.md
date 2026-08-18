@@ -11,68 +11,96 @@ document + page citations.
 - **Orchestration**: LangChain (`langchain`, `langchain-openai`, `langchain-community`, `langchain-chroma`)
 - **LLM**: OpenAI `gpt-4o-mini`
 - **Embeddings**: OpenAI `text-embedding-3-small`
-- **Vector store**: ChromaDB, persisted to disk at `./chroma_db`
+- **Vector store**: ChromaDB, persisted to disk at `backend/chroma_db`
 - **PDF parsing**: `pypdf`
 - **Package manager**: [`uv`](https://docs.astral.sh/uv/)
 
 ## Project structure
 
+The app is split into two independently-runnable projects: `backend/` (the
+RAG pipeline + FastAPI serving layer) and `frontend/` (the Streamlit UI,
+a pure HTTP client of the backend). Each has its own `requirements.txt`,
+`Dockerfile`, and `.env` -- the frontend's dependency set is a fraction of
+the backend's, since it never imports langchain/chromadb/etc. directly.
+
 ```
 rag-doc-assistant/
-├── data/pdfs/          # source PDFs live here
-├── chroma_db/          # persisted Chroma store (auto-created, git-ignored)
-├── reports/            # eval reports + query_log.jsonl (auto-created, git-ignored)
-├── ingest.py           # PDF -> chunk -> embed -> persist to Chroma
-├── rag.py              # query -> retrieve -> grounded, cited answer
-├── api.py              # FastAPI serving layer -- thin wrapper around rag.py/ingest.py
-├── app.py              # Streamlit UI -- HTTP client of api.py, no direct RAG imports
-├── requirements.txt
-├── .env.example
+├── backend/
+│   ├── data/pdfs/          # source PDFs live here
+│   ├── chroma_db/          # persisted Chroma store (auto-created, git-ignored)
+│   ├── reports/            # eval reports + query_log.jsonl (auto-created, git-ignored)
+│   ├── eval/                # golden_questions.yaml + run_eval.py (imports rag.py directly)
+│   ├── ingest.py            # PDF -> chunk -> embed -> persist to Chroma
+│   ├── rag.py               # query -> retrieve -> grounded, cited answer
+│   ├── embeddings.py        # single source of truth for the embedding model
+│   ├── api.py                # FastAPI serving layer -- thin wrapper around rag.py/ingest.py
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   ├── .env.example
+│   └── .env                 # OPENAI_API_KEY (git-ignored)
+├── frontend/
+│   ├── .streamlit/config.toml
+│   ├── app.py                # Streamlit UI -- HTTP client of api.py, no direct RAG imports
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── .dockerignore
+├── docker-compose.yml        # wires both services together (see "Run with Docker")
 ├── .gitignore
 └── README.md
 ```
 
-`api.py` is the only process that imports `rag.py`/`ingest.py` at runtime for
-serving traffic. `app.py` talks to it over HTTP; `eval/run_eval.py` imports
-`rag.py` directly instead, since it's testing the pipeline, not the API.
+`backend/api.py` is the only process that imports `rag.py`/`ingest.py` at
+runtime for serving traffic. `frontend/app.py` talks to it over HTTP;
+`backend/eval/run_eval.py` imports `rag.py` directly instead, since it's
+testing the pipeline, not the API.
 
 ## Setup
 
 Requires Python 3.10+ and [`uv`](https://docs.astral.sh/uv/getting-started/installation/) installed.
+Each project gets its own virtual environment.
 
 ```bash
 cd rag-doc-assistant
 
-# Create a virtual environment and install dependencies with uv
+# Backend
+cd backend
 uv venv
 uv pip install -r requirements.txt
-
-# Add your OpenAI API key
 cp .env.example .env
 # then edit .env and set OPENAI_API_KEY=sk-...
+cd ..
+
+# Frontend
+cd frontend
+uv venv
+uv pip install -r requirements.txt
+cd ..
 ```
 
 ## Run
 
 **1. (Optional) Pre-ingest documents from the command line.**
-Drop PDFs into `data/pdfs/` and run:
+Drop PDFs into `backend/data/pdfs/` and, from `backend/`, run:
 
 ```bash
 uv run ingest.py
 ```
 
-This builds/updates the persisted Chroma store at `./chroma_db`. You can skip
-this step entirely and just upload PDFs through the UI instead — both paths
-call the same ingestion code.
+This builds/updates the persisted Chroma store at `backend/chroma_db/`. You
+can skip this step entirely and just upload PDFs through the UI instead --
+both paths call the same ingestion code.
 
-**2. Run both processes.** The Streamlit UI is now an HTTP client of a
-FastAPI serving layer — start the API first, then the UI, in two terminals:
+**2. Run both processes.** The Streamlit UI is an HTTP client of a FastAPI
+serving layer -- start the API first, then the UI, in two terminals:
 
 ```bash
 # Terminal 1 -- the API (retrieval/generation/ingestion live here)
+cd backend
 uv run uvicorn api:app --reload
 
 # Terminal 2 -- the Streamlit UI (talks to the API over HTTP)
+cd frontend
 uv run streamlit run app.py
 ```
 
@@ -91,36 +119,38 @@ API_BASE_URL=http://your-host:8000 uv run streamlit run app.py
 **3. (Optional) Command-line sanity check without either process:**
 
 ```bash
+cd backend
 uv run rag.py "How many days of PTO do new hires get?"
 ```
 
 ## Run with Docker
 
-Both processes also run as two containers from one shared image
-(`Dockerfile`), wired together by `docker-compose.yml`. The API's `/health`
-endpoint gates the UI's startup, and `data/`, `chroma_db/`, and `reports/`
-are bind-mounted so ingested documents and the vector store persist across
+Each project has its own `Dockerfile` (and its own, right-sized dependency
+set); `docker-compose.yml` at the repo root builds both and wires them
+together. The API's `/health` endpoint gates the UI's startup, and
+`backend/data/`, `backend/chroma_db/`, and `backend/reports/` are
+bind-mounted so ingested documents and the vector store persist across
 rebuilds.
 
 ```bash
-# uses the OPENAI_API_KEY already in .env (see Setup above)
+# uses the OPENAI_API_KEY already in backend/.env (see Setup above)
 docker compose up --build
 ```
 
 Then open `http://localhost:8501`. The API is also reachable directly at
 `http://localhost:8000` (e.g. `curl http://localhost:8000/health`).
 
-Note: the image pins Python 3.12, not whatever your local `.venv` uses --
-`langchain-chroma` requires `numpy<2.0`, which has no prebuilt wheel for
-Python 3.13 on Linux, and the slim image has no C compiler to build it from
-source.
+Note: both images pin Python 3.12, not whatever version your local `.venv`
+uses -- `langchain-chroma` requires `numpy<2.0`, which has no prebuilt wheel
+for Python 3.13 on Linux, and the slim image has no C compiler to build it
+from source.
 
 ## How it works
 
 1. **Ingestion** (`ingest.py`): each PDF is loaded page-by-page with
    `PyPDFLoader`, split into chunks with `RecursiveCharacterTextSplitter`,
    embedded with `text-embedding-3-small`, and written into a persisted
-   Chroma collection at `./chroma_db`.
+   Chroma collection at `backend/chroma_db`.
 2. **Retrieval** (`rag.py`): a question is embedded and matched against the
    Chroma collection using MMR search (`k=4`) so the returned chunks are
    relevant *and* diverse rather than near-duplicates of the same passage.
@@ -151,7 +181,7 @@ source.
   is checked verbatim in code so the UI never silently shows a hallucinated
   answer with fake sources.
 - **Persisted Chroma, not an in-memory list**: `Chroma(persist_directory=...)`
-  writes vectors and metadata to disk in `./chroma_db`, so the app doesn't
+  writes vectors and metadata to disk in `backend/chroma_db`, so the app doesn't
   need to re-embed documents on every restart, and multiple app runs share
   one durable knowledge base.
 
@@ -160,11 +190,11 @@ source.
 | ID | Requirement | How it's met |
 |----|-------------|---------------|
 | **M6S1** | Chunk size/overlap are intentional, documented constants with a written rationale. | `CHUNK_SIZE = 800` / `CHUNK_OVERLAP = 150` defined at the top of `ingest.py`, with the rationale in a comment directly above them and repeated above. |
-| **M6S2** | Embeddings are persisted in Chroma on disk (`./chroma_db`), not a Python list. | `ingest.get_vector_store()` and `rag.get_retriever()` both construct `Chroma(persist_directory="./chroma_db", ...)`; nothing in the app holds embeddings in memory across runs. |
+| **M6S2** | Embeddings are persisted in Chroma on disk (`backend/chroma_db`), not a Python list. | `ingest.get_vector_store()` and `rag.get_retriever()` both construct `Chroma(persist_directory=PERSIST_DIR, ...)` (resolved relative to `backend/`); nothing in the app holds embeddings in memory across runs. |
 | **M6S3** | Retrieval returns the relevant chunks for real questions; citations match content. | `rag.py` uses MMR similarity search (`k=4`) against the persisted collection, and the returned `Document` objects (with original metadata) are what both the LLM context and the citation list are built from — the same chunk text drives both. |
 | **M6S4** | Every answer shows the exact source document and page it came from. | Metadata `{"source": <filename>, "page": <page_number>}` is captured at ingestion (`ingest.load_and_split`) and rendered as a deduplicated "Sources" list in `app.py`. |
 | **M6S5** | Out-of-scope questions return `"I don't know based on the provided documents."` — no hallucination. | The system prompt in `rag.py` mandates this exact sentence when context is insufficient, and the app checks for it verbatim to suppress a misleading "Sources" list on that path. |
-| **M6S6** | A never-before-seen PDF works end-to-end just by uploading it — nothing hardcoded per document. | `app.py`'s file uploader saves any PDF to `data/pdfs/` and calls the generic `ingest.ingest_files()` — there is no document-specific logic anywhere in the pipeline. |
+| **M6S6** | A never-before-seen PDF works end-to-end just by uploading it — nothing hardcoded per document. | `app.py`'s file uploader saves any PDF to `backend/data/pdfs/` and calls the generic `ingest.ingest_files()` — there is no document-specific logic anywhere in the pipeline. |
 
 ## Error handling
 

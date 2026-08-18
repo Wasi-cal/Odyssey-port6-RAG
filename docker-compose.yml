@@ -1,15 +1,65 @@
 services:
+  # --- Temporal (durable, per-file-retryable ingestion workflow) ---------
+  temporal-db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=temporal
+      - POSTGRES_PASSWORD=temporal
+    volumes:
+      - temporal-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-db
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+    ports:
+      - "7233:7233"
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: python worker.py
+    env_file:
+      - ./backend/.env
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/chroma_db:/app/chroma_db
+      - ./backend/reports:/app/reports
+    depends_on:
+      - temporal
+    restart: unless-stopped
+
+  # --- App ----------------------------------------------------------------
   api:
-    build: .
+    build: ./backend
     command: uvicorn api:app --host 0.0.0.0 --port 8000
     env_file:
-      - .env
+      - ./backend/.env
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
-      - ./chroma_db:/app/chroma_db
-      - ./reports:/app/reports
+      - ./backend/data:/app/data
+      - ./backend/chroma_db:/app/chroma_db
+      - ./backend/reports:/app/reports
+    depends_on:
+      - temporal
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -19,7 +69,7 @@ services:
     restart: unless-stopped
 
   ui:
-    build: .
+    build: ./frontend
     command: >
       streamlit run app.py
       --server.address 0.0.0.0
@@ -34,3 +84,6 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  temporal-db-data:

@@ -1,11 +1,7 @@
-.venv/
 __pycache__/
 *.pyc
-.git/
-.gitignore
 .DS_Store
-.idea/
-.claudeignore
+.env
 
 # Persisted at runtime via volumes -- don't bake existing local state into
 # the image, and keep the build context small.
@@ -13,9 +9,3 @@ chroma_db/
 data/pdfs/*
 !data/pdfs/.gitkeep
 reports/
-
-# Not needed by api.py/app.py at runtime
-eval/
-design_handoff_documents_assistant/
-appv1.py
-README.md

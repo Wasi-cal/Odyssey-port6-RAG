@@ -3,6 +3,6 @@ chroma_db/
 __pycache__/
 *.pyc
 .venv/
-data/pdfs/*
-!data/pdfs/.gitkeep
+backend/data/pdfs/*
+!backend/data/pdfs/.gitkeep
 reports/

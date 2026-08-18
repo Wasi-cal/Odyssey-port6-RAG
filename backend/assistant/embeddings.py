@@ -2,14 +2,15 @@
 embeddings.py — single source of truth for the embedding model configuration.
 
 Architecture: all-hosted. Both embeddings (this module, text-embedding-3-small)
-and generation (rag.py, gpt-4o-mini) are OpenAI-hosted -- every document chunk
-(at ingestion) and every user query (at retrieval and generation) is sent to
-OpenAI's API.
+and generation (retrieval/prompt.py, gpt-4o-mini) are OpenAI-hosted -- every
+document chunk (at ingestion) and every user query (at retrieval and
+generation) is sent to OpenAI's API.
 
-Both ingest.py and rag.py MUST call get_embeddings() rather than constructing
-OpenAIEmbeddings themselves. Documents and queries have to be embedded by the
-identical model for vector similarity between them to mean anything -- routing
-both call sites through one function is what guarantees that never drifts.
+Both ingestion/store.py and retrieval/store.py MUST call get_embeddings()
+rather than constructing OpenAIEmbeddings themselves. Documents and queries
+have to be embedded by the identical model for vector similarity between them
+to mean anything -- routing both call sites through one function is what
+guarantees that never drifts.
 """
 
 from dotenv import load_dotenv
