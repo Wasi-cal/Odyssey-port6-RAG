@@ -6,7 +6,8 @@ and retrieval/prompt.py together.
 import re
 from dataclasses import dataclass, field
 
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from openai import OpenAI
 
@@ -56,6 +57,36 @@ _TITLE_ANSWER_RE = re.compile(r"TITLE:\s*(.*?)\s*\n+ANSWER:\s*(.*)", re.DOTALL)
 # has occasionally come back verbatim anyway. _split_title_and_answer
 # catches that as a defensive backstop, not just a prompt instruction.
 _NO_PREVIOUS_TITLE = "(none yet -- this is the first message)"
+
+# Fallback only -- live value is config_settings' generation/history_messages
+# (see config_store.seed_defaults). Counts messages (user + assistant), not
+# turns, so this is ~3 back-and-forth exchanges by default.
+_HISTORY_MESSAGES_DEFAULT = 12
+# Each prior message is truncated to this many characters before being handed
+# back to the model -- a single very long past answer (this tool's answers
+# can run long, see prompt.py's completeness rules) shouldn't be able to
+# balloon every subsequent call's prompt size just by having happened once.
+_HISTORY_MESSAGE_MAX_CHARS = 1000
+
+
+def _build_history_messages(chat_history: list[dict] | None) -> list:
+    """Turns [{"role": "user"|"assistant", "content": str}, ...] (oldest
+    first, as api.py reads them from db.get_messages) into LangChain message
+    objects for MessagesPlaceholder("chat_history") below -- this is what
+    lets the model resolve a follow-up question ("what about part-time
+    employees?") against what was actually discussed earlier in the same
+    session, instead of treating every question as if it were the first.
+    Retrieval itself still only searches on the current question's text;
+    only the generation call sees prior turns.
+    """
+    limit = config_store.get("generation", "history_messages", _HISTORY_MESSAGES_DEFAULT)
+    trimmed = (chat_history or [])[-limit:] if limit > 0 else []
+    messages = []
+    for m in trimmed:
+        content = (m.get("content") or "")[:_HISTORY_MESSAGE_MAX_CHARS]
+        cls = HumanMessage if m.get("role") == "user" else AIMessage
+        messages.append(cls(content=content))
+    return messages
 
 
 def _split_title_and_answer(raw_text: str) -> tuple[str | None, str]:
@@ -140,8 +171,20 @@ def _is_abusive(question: str) -> bool:
         return False
 
 
-def answer_question(question: str, previous_title: str | None = None) -> RagResult:
+def answer_question(
+    question: str,
+    previous_title: str | None = None,
+    chat_history: list[dict] | None = None,
+) -> RagResult:
     """Retrieve relevant chunks and generate a grounded, cited answer.
+
+    chat_history (oldest first, [{"role": "user"|"assistant", "content": str}, ...],
+    as api.py reads them from db.get_messages before adding the new question)
+    is given to the generation model as prior turns -- see
+    _build_history_messages -- so it can resolve a follow-up question
+    against what was actually discussed earlier, e.g. "what about part-time
+    employees?" after a question about full-time PTO. Retrieval is
+    unaffected: it still searches on only the current question's text.
 
     Returns one of several fixed responses (with empty sources) instead of a
     grounded content answer when one isn't appropriate. Two of these are
@@ -215,7 +258,11 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
 
     llm = ChatOpenAI(model=generation_model, temperature=generation_temperature)
     prompt = ChatPromptTemplate.from_messages(
-        [("system", system_prompt), ("human", "{question}")]
+        [
+            ("system", system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{question}"),
+        ]
     )
     chain = prompt | llm
 
@@ -226,6 +273,7 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
     # silently break the fallback-detection check.
     response = chain.invoke(
         {
+            "chat_history": _build_history_messages(chat_history),
             "context": context,
             "question": question,
             "previous_title": previous_title or _NO_PREVIOUS_TITLE,

@@ -545,6 +545,11 @@ def ask(payload: AskRequest, user_id: str = Depends(get_current_user)) -> AskRes
         # whether it belongs to someone else.
         raise HTTPException(status_code=404, detail="Session not found.")
 
+    # Fetched BEFORE add_message below, so this is every PRIOR message in
+    # the session (oldest first, matching what qa.py's chat_history param
+    # expects) -- not including the question just asked this call.
+    chat_history = db.get_messages(payload.session_id)
+
     db.add_message(payload.session_id, "user", question, None)
     previous_title = db.get_session_title(payload.session_id)
 
@@ -553,8 +558,10 @@ def ask(payload: AskRequest, user_id: str = Depends(get_current_user)) -> AskRes
         # Reused as-is: same retrieval, grounding prompt, citation assembly
         # as the CLI (rag.py's __main__) and the previous direct-import UI.
         # previous_title lets the model evolve the session's title turn by
-        # turn instead of freezing it at the first message (see qa.py).
-        result = answer_question(question, previous_title=previous_title)
+        # turn instead of freezing it at the first message; chat_history
+        # lets it resolve follow-up questions against earlier turns (see
+        # qa.py).
+        result = answer_question(question, previous_title=previous_title, chat_history=chat_history)
     except RuntimeError as e:
         # e.g. OPENAI_API_KEY missing -- rag.py already raises a clear
         # message here; surface it as a clean 500, not a stack trace.

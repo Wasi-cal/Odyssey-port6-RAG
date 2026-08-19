@@ -166,6 +166,17 @@ def seed_defaults() -> None:
                 "description": "Generation temperature (0 = deterministic).",
             },
             {
+                "category": "generation",
+                "key": "history_messages",
+                "value": 12,
+                "description": (
+                    "How many of the most recent chat messages (user + assistant, not just "
+                    "turns) are given to the model as prior context on every /ask call -- lets "
+                    "it resolve follow-up questions ('what about part-time employees?') against "
+                    "what was already discussed. 0 disables chat history entirely."
+                ),
+            },
+            {
                 "category": "retrieval",
                 "key": "k",
                 "value": K,
