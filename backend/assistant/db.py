@@ -59,11 +59,18 @@ CREATE TABLE IF NOT EXISTS users (
 -- user's questions to draw from, so the library listing matches that --
 -- filename is the primary key (one row per document, period), unlike
 -- chat_sessions/chat_messages below which genuinely are per-user.
--- uploaded_by is attribution only, not a filter.
+-- uploaded_by is attribution only, not a filter. content_hash (sha256 of
+-- the raw file bytes) is what actually decides "is this a duplicate
+-- upload" in api.py -- filename is still the storage/display identity
+-- (Chroma's chunk "source" metadata, the primary key here, what
+-- GET /documents/{filename} serves), but comparing names to catch
+-- duplicates is unreliable: the same file re-uploaded under any other name
+-- would slip through. NULL for any row that predates this column.
 CREATE TABLE IF NOT EXISTS documents (
     filename TEXT PRIMARY KEY,
     uploaded_by TEXT NOT NULL REFERENCES users(id),
     chunk_count INTEGER NOT NULL,
+    content_hash TEXT,
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -129,6 +136,7 @@ CREATE TABLE IF NOT EXISTS pending_documents (
     uploaded_by TEXT NOT NULL REFERENCES users(id),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
     chunk_count INTEGER,
+    content_hash TEXT,
     uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     reviewed_at TIMESTAMPTZ
 );
@@ -199,6 +207,17 @@ _MIGRATE_USERS_SQL = """
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 """
 
+# One-time migration for documents/pending_documents tables created before
+# hash-based duplicate detection existed -- same "IF NOT EXISTS never alters
+# an existing table" reason as _MIGRATE_USERS_SQL. Existing rows just get
+# content_hash = NULL (no duplicate check against them until they're
+# re-uploaded or the library is rebuilt); nothing reads this column and
+# assumes it's non-null.
+_MIGRATE_CONTENT_HASH_SQL = """
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash TEXT;
+ALTER TABLE pending_documents ADD COLUMN IF NOT EXISTS content_hash TEXT;
+"""
+
 
 def init_db() -> None:
     """Open the pool and create tables if they don't exist yet.
@@ -212,6 +231,7 @@ def init_db() -> None:
         conn.execute(_SCHEMA_SQL)
         conn.execute(_MIGRATE_USERS_SQL)
         conn.execute(_MIGRATE_DOCUMENTS_SQL)
+        conn.execute(_MIGRATE_CONTENT_HASH_SQL)
 
 
 def close_db() -> None:
@@ -270,7 +290,7 @@ def list_documents() -> list[dict]:
     return [{"name": r[0], "chunk_count": r[1], "ingested_at": r[2].isoformat()} for r in rows]
 
 
-def add_document(user_id: str, filename: str, chunk_count: int) -> None:
+def add_document(user_id: str, filename: str, chunk_count: int, content_hash: str | None) -> None:
     """Upserts on filename -- a defensive no-op-safe overwrite rather than a
     duplicate-key error, in case this filename already has a row (e.g.
     recovering from a prior partial failure that left disk/Chroma/Postgres
@@ -278,21 +298,40 @@ def add_document(user_id: str, filename: str, chunk_count: int) -> None:
     """
     with _pool.connection() as conn:
         conn.execute(
-            "INSERT INTO documents (filename, uploaded_by, chunk_count) VALUES (%s, %s, %s) "
+            "INSERT INTO documents (filename, uploaded_by, chunk_count, content_hash) "
+            "VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (filename) DO UPDATE SET "
-            "uploaded_by = EXCLUDED.uploaded_by, chunk_count = EXCLUDED.chunk_count, ingested_at = now()",
-            (filename, user_id, chunk_count),
+            "uploaded_by = EXCLUDED.uploaded_by, chunk_count = EXCLUDED.chunk_count, "
+            "content_hash = EXCLUDED.content_hash, ingested_at = now()",
+            (filename, user_id, chunk_count, content_hash),
         )
 
 
 def list_all_filenames() -> set[str]:
-    """Every currently-known filename -- what /ingest checks a new upload's
-    name against to reject a duplicate (see api.py). Combined with
-    list_pending_filenames() there, so a name already awaiting approval
-    can't be queued a second time either.
+    """Every currently-known filename -- api.py still checks a new upload's
+    name against this, since filename is the storage/display identity
+    (Chroma's chunk "source" metadata, this table's primary key), even
+    though whether it's a DUPLICATE upload is decided by content_hash
+    instead (see list_all_content_hashes) -- comparing names alone would
+    miss the same file re-uploaded under a different name.
     """
     with _pool.connection() as conn:
         rows = conn.execute("SELECT filename FROM documents").fetchall()
+    return {r[0] for r in rows}
+
+
+def list_all_content_hashes() -> set[str]:
+    """Every currently-known content hash, for api.py's actual duplicate-
+    upload check (see list_all_filenames's comment for why this replaced
+    filename comparison). Combined with list_pending_content_hashes() there,
+    so content already awaiting approval can't be queued a second time
+    either. NULL hashes (rows from before this column existed) are excluded
+    -- they were never hashed, so they can neither match nor be matched.
+    """
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT content_hash FROM documents WHERE content_hash IS NOT NULL"
+        ).fetchall()
     return {r[0] for r in rows}
 
 
@@ -435,23 +474,39 @@ def list_admin_audit_log(limit: int = 50) -> list[dict]:
 # -- pending_documents (upload-approval queue) --------------------------------
 
 
-def create_pending_document(pending_id: str, filename: str, staged_path: str, uploaded_by: str) -> None:
+def create_pending_document(
+    pending_id: str, filename: str, staged_path: str, uploaded_by: str, content_hash: str
+) -> None:
     with _pool.connection() as conn:
         conn.execute(
-            "INSERT INTO pending_documents (id, filename, staged_path, uploaded_by) "
-            "VALUES (%s, %s, %s, %s)",
-            (pending_id, filename, staged_path, uploaded_by),
+            "INSERT INTO pending_documents (id, filename, staged_path, uploaded_by, content_hash) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (pending_id, filename, staged_path, uploaded_by, content_hash),
         )
 
 
 def list_pending_filenames() -> set[str]:
     """Filenames currently awaiting approval -- combined with
-    list_all_filenames() in api.py so a name already queued can't be
-    uploaded a second time by someone else before it's reviewed.
+    list_all_filenames() in api.py for the storage-identity name check (see
+    that function's comment); list_pending_content_hashes() is the actual
+    duplicate-upload check.
     """
     with _pool.connection() as conn:
         rows = conn.execute(
             "SELECT filename FROM pending_documents WHERE status = 'pending'"
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+def list_pending_content_hashes() -> set[str]:
+    """Content hashes currently awaiting approval -- combined with
+    list_all_content_hashes() in api.py so content already queued can't be
+    uploaded a second time by someone else before it's reviewed.
+    """
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT content_hash FROM pending_documents "
+            "WHERE status = 'pending' AND content_hash IS NOT NULL"
         ).fetchall()
     return {r[0] for r in rows}
 
@@ -488,13 +543,20 @@ def list_all_pending_documents() -> list[dict]:
 def get_pending_document(pending_id: str) -> dict | None:
     with _pool.connection() as conn:
         row = conn.execute(
-            "SELECT id, filename, staged_path, uploaded_by, status FROM pending_documents "
-            "WHERE id = %s",
+            "SELECT id, filename, staged_path, uploaded_by, status, content_hash "
+            "FROM pending_documents WHERE id = %s",
             (pending_id,),
         ).fetchone()
     if row is None:
         return None
-    return {"id": row[0], "filename": row[1], "staged_path": row[2], "uploaded_by": row[3], "status": row[4]}
+    return {
+        "id": row[0],
+        "filename": row[1],
+        "staged_path": row[2],
+        "uploaded_by": row[3],
+        "status": row[4],
+        "content_hash": row[5],
+    }
 
 
 def mark_pending_approved(pending_id: str, chunk_count: int) -> None:

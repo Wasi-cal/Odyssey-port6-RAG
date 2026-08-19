@@ -24,6 +24,7 @@ this API; it imports rag.py directly, since it tests the pipeline itself,
 not this transport layer.
 """
 
+import hashlib
 import json
 import time
 import uuid
@@ -476,7 +477,7 @@ async def approve_pending_document(pending_id: str, _: None = Depends(get_curren
     chunk_count = results[0]["chunk_count"]
     embed_tokens = results[0]["embed_tokens"]
 
-    db.add_document(pending["uploaded_by"], pending["filename"], chunk_count)
+    db.add_document(pending["uploaded_by"], pending["filename"], chunk_count, pending["content_hash"])
     db.log_admin_action("upload", pending["filename"], pending["uploaded_by"])
     db.mark_pending_approved(pending_id, chunk_count)
     if embed_tokens:
@@ -635,10 +636,14 @@ async def ingest_endpoint(
         raise HTTPException(status_code=400, detail="No files uploaded.")
 
     PENDING_DIR.mkdir(parents=True, exist_ok=True)
-    # Checked against both the live library AND anything already queued --
-    # filenames are the shared identity a document is stored/retrieved
-    # under, so a name can't be claimed twice before it's even reviewed.
-    reserved = db.list_all_filenames() | db.list_pending_filenames()
+    # Actual duplicate-upload check is by content hash, not filename --
+    # filename comparison is unreliable (the same file re-uploaded under a
+    # different name would slip through). Filenames are still checked
+    # separately below: they're the storage/display identity (Chroma's
+    # chunk "source" metadata, the documents table's primary key,
+    # GET /documents/{filename}), so two DIFFERENT files can't share one.
+    reserved_hashes = db.list_all_content_hashes() | db.list_pending_content_hashes()
+    reserved_names = db.list_all_filenames() | db.list_pending_filenames()
 
     queued = []
     skipped = []
@@ -646,13 +651,19 @@ async def ingest_endpoint(
         name = uploaded.filename or ""
         if not name.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail=f"{name!r} is not a PDF.")
-        if name in reserved:
+
+        content = await uploaded.read()
+        content_hash = hashlib.sha256(content).hexdigest()
+
+        if content_hash in reserved_hashes or name in reserved_names:
             skipped.append(name)
             continue
+
         dest = PENDING_DIR / name
-        dest.write_bytes(await uploaded.read())
-        db.create_pending_document(str(uuid.uuid4()), name, str(dest), user_id)
-        reserved.add(name)
+        dest.write_bytes(content)
+        db.create_pending_document(str(uuid.uuid4()), name, str(dest), user_id, content_hash)
+        reserved_hashes.add(content_hash)
+        reserved_names.add(name)
         queued.append(name)
 
     return UploadResponse(queued=queued, skipped=skipped)
