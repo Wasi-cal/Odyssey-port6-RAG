@@ -1,210 +1,216 @@
-# Internal Documents Assistant (RAG)
+# Doc Assist
 
-A Retrieval-Augmented Generation Q&A tool for internal PDF documents — HR
-policies, SOPs, manuals, onboarding docs. Users ask plain-English questions
-and get answers grounded ONLY in the uploaded PDFs, with exact
-document + page citations.
+**The internal knowledge assistant that answers policy questions instantly — and never makes one up.**
 
-## Tech stack
+Doc Assist turns your HR policies, SOPs, and onboarding materials into a chatbot every employee can just *ask*. Every answer is grounded in an actual document and cited down to the page, every upload is reviewed by an admin before it's live, and every dollar spent on it is visible on a dashboard — not buried in an API bill you find out about at the end of the month.
 
-- **UI**: Streamlit
-- **Orchestration**: LangChain (`langchain`, `langchain-openai`, `langchain-community`, `langchain-chroma`)
-- **LLM**: OpenAI `gpt-4o-mini`
-- **Embeddings**: OpenAI `text-embedding-3-small`
-- **Vector store**: ChromaDB, persisted to disk at `backend/chroma_db`
-- **PDF parsing**: `pypdf`
-- **Package manager**: [`uv`](https://docs.astral.sh/uv/)
+---
 
-## Project structure
+## Why teams use this
 
-The app is split into two independently-runnable projects: `backend/` (the
-RAG pipeline + FastAPI serving layer) and `frontend/` (the Streamlit UI,
-a pure HTTP client of the backend). Each has its own `requirements.txt`,
-`Dockerfile`, and `.env` -- the frontend's dependency set is a fraction of
-the backend's, since it never imports langchain/chromadb/etc. directly.
+**HR and IT stop answering the same five questions a hundred times a week.** "How many PTO days do I get?" "What's the remote work policy?" "How do I submit an expense report?" — the answers already exist, scattered across a dozen PDFs nobody reads end to end. Doc Assist reads all of them and answers in seconds, in plain language, with a citation pointing straight to the source paragraph.
+
+**It won't guess, and it won't be tricked into guessing.** Most "AI chatbot" pilots die the first time someone screenshots it confidently inventing a policy that doesn't exist. This one is built to refuse instead: if the documents don't cover it, it says so and points to a human. If someone tries to jailbreak it — "ignore your instructions," a prompt buried inside an uploaded PDF, a request for something genuinely harmful — it's explicitly hardened to recognize that and decline, not comply.
+
+**Nothing goes live without a human saying so.** Anyone can upload a document, but it sits in a review queue until an admin approves it — no accidental leaks of a draft policy, no employee quietly slipping in their own "reference material" that the whole company starts getting answers from.
+
+**You can see exactly what it's costing you, in real time.** A dedicated admin dashboard — separate login, nothing an ordinary user ever sees — shows pending approvals, how many document chunks are actually indexed, tokens consumed, and an estimated dollar cost, live. No surprises, no digging through an OpenAI billing page to reverse-engineer what happened.
+
+**It's yours to tune, not a black box.** The system prompt, the model, retrieval behavior, pricing assumptions, session lengths, rate limits — all editable live from the database, no redeploy, no waiting on an engineering ticket to change how the assistant talks.
+
+### At a glance
+
+| | |
+|---|---|
+| 💬 **Ask, don't search** | Plain-English questions, grounded answers, exact document + page citations |
+| 🧠 **Remembers the conversation** | Follow-up questions ("what about part-time employees?") resolve against what was already discussed |
+| 🛡️ **Refuses what it should** | Won't hallucinate, won't be prompt-injected, won't answer a dangerous request even if a document technically covers it |
+| ✅ **Human-in-the-loop uploads** | Every new document is queued for admin approval before it's searchable |
+| 📊 **Live cost & usage dashboard** | Pending approvals, index size, tokens consumed, estimated spend — one page, no billing archaeology |
+| 🔐 **Separate admin surface** | A distinct login, distinct credentials, distinct app — regular users never see admin controls, let alone use them |
+| ⚙️ **Configurable without a redeploy** | Prompts, pricing, session/lockout windows all live in the database, editable on the fly |
+| 🔁 **Durable ingestion** | Large uploads and transient API hiccups are retried automatically, per-file, without redoing a whole batch |
+
+### See it in action
+
+> 📸 *Screenshot: the chat interface — a question, a grounded answer, and its citations*
+> `docs/screenshots/chat.png` — add here
+>
+> 📸 *Screenshot: a document sitting in "waiting for admin approval"*
+> `docs/screenshots/pending-approval.png` — add here
+>
+> 📸 *Screenshot: the admin monitoring dashboard*
+> `docs/screenshots/admin-dashboard.png` — add here
+>
+> 📸 *Screenshot: the admin login screen*
+> `docs/screenshots/admin-login.png` — add here
+
+*(Screenshots pending — drop image files at the paths above and swap these callouts for `![...](path)` once captured.)*
+
+---
+
+## How it's built
+
+The rest of this document is for the people who'll run, extend, or audit it.
+
+### Architecture
+
+Doc Assist is a small set of cooperating services, not one monolith:
 
 ```
-rag-doc-assistant/
+                    ┌─────────────┐
+   Browser ───TLS──►│    Caddy    │  (reverse proxy, self-signed local cert)
+                    └──────┬──────┘
+                           │
+             ┌─────────────┼──────────────┐
+             ▼             ▼              ▼
+        ┌────────┐   ┌──────────┐   ┌───────────┐
+        │   ui    │   │   api    │   │ admin-ui  │
+        │(Streamlit) │ (FastAPI) │  │(Streamlit) │
+        └────────┘   └────┬─────┘   └───────────┘
+                           │
+        ┌──────────────────┼──────────────────┬─────────────┐
+        ▼                  ▼                  ▼             ▼
+   ┌──────────┐      ┌──────────┐      ┌───────────┐  ┌───────────┐
+   │  app-db   │      │  redis   │      │  Chroma    │  │ Temporal  │
+   │(Postgres) │      │ (config  │      │ (vectors,  │  │ (durable  │
+   │ accounts, │      │  cache + │      │  on disk)  │  │ ingestion │
+   │ chats,    │      │  login   │      └───────────┘  │ workflow) │
+   │ documents,│      │ lockout) │                      └─────┬─────┘
+   │ usage log │      └──────────┘                            │
+   └──────────┘                                          ┌────┴────┐
+                                                          │ worker  │
+                                                          │(extract/│
+                                                          │ chunk/  │
+                                                          │ embed)  │
+                                                          └─────────┘
+```
+
+- **`ui`** — the chatbot (Streamlit). Login/register, chat, upload, library, chat history. Talks to `api` over HTTP only; owns no business logic.
+- **`admin-ui`** — a second, independent Streamlit app (`frontend/admin_app.py`). Its own login (a shared admin password, never the same credential space as regular users), one page: approve/reject pending uploads, usage/cost dashboard, audit log, reset a user's password, change the admin password.
+- **`api`** (FastAPI) — the only thing that touches the database, the vector store, or OpenAI. Issues and verifies two structurally distinct JWT types (user vs. admin) so one can never be replayed as the other.
+- **`worker`** — a Temporal worker that does the actual extraction/chunking/embedding for an approved upload, one activity per file, retried independently on transient failure.
+- **Postgres** — accounts, chat sessions/messages, the document library, the upload-approval queue, the admin audit log, token/cost usage log, and all hot-reloadable app configuration.
+- **Redis** — a cache-aside layer in front of that configuration (so reading it on every request doesn't hit Postgres), plus login-attempt counters for rate limiting.
+- **Chroma** — the vector store, persisted to disk, holding document chunk embeddings.
+- **Caddy** — TLS termination for the three browser-facing services (chat, API, admin), each on the same port they'd otherwise expose directly, just over HTTPS.
+
+### Tech stack
+
+- **Backend**: FastAPI, Python
+- **Frontend**: Streamlit (two separate apps: chatbot + admin)
+- **LLM**: OpenAI `gpt-4o-mini` (generation), `text-embedding-3-small` (embeddings) — both swappable via live config
+- **RAG orchestration**: LangChain (`langchain-openai`, `langchain-chroma`)
+- **Vector store**: ChromaDB, persisted to disk
+- **Relational store**: PostgreSQL (accounts, chat history, document library, config, usage/cost logs)
+- **Cache / rate limiting**: Redis
+- **Durable ingestion**: Temporal (workflow + per-file activities, automatic retry)
+- **Auth**: JWT (`PyJWT`), bcrypt password hashing, two independent token types (user / admin)
+- **TLS**: Caddy, self-signed local CA for local/dev deployment
+- **PDF parsing**: `pymupdf4llm` (Markdown-aware extraction) with an OCR fallback (`pytesseract`) for scanned pages
+- **Tokenization / cost estimation**: `tiktoken`
+
+### Project structure
+
+```
+.
 ├── backend/
-│   ├── data/pdfs/          # source PDFs live here
-│   ├── chroma_db/          # persisted Chroma store (auto-created, git-ignored)
-│   ├── reports/            # eval reports + query_log.jsonl (auto-created, git-ignored)
-│   ├── eval/                # golden_questions.yaml + run_eval.py (imports rag.py directly)
-│   ├── ingest.py            # PDF -> chunk -> embed -> persist to Chroma
-│   ├── rag.py               # query -> retrieve -> grounded, cited answer
-│   ├── embeddings.py        # single source of truth for the embedding model
-│   ├── api.py                # FastAPI serving layer -- thin wrapper around rag.py/ingest.py
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   ├── .dockerignore
-│   ├── .env.example
-│   └── .env                 # OPENAI_API_KEY (git-ignored)
+│   ├── api.py                       # FastAPI app -- the only process touching DB/vectors/OpenAI
+│   ├── ingest.py, rag.py            # thin CLI/re-export entrypoints
+│   ├── worker.py                    # Temporal worker entrypoint
+│   ├── assistant/
+│   │   ├── auth.py                  # password hashing, user + admin JWTs
+│   │   ├── db.py                    # all Postgres reads/writes
+│   │   ├── config_store.py          # Redis-cached, Postgres-backed live config
+│   │   ├── rate_limit.py            # login lockout counters
+│   │   ├── pricing.py               # token cost estimation
+│   │   ├── embeddings.py            # embedding model config + token counting
+│   │   ├── ingestion/               # extraction, chunking, boilerplate stripping, Chroma writes
+│   │   ├── retrieval/               # retriever, grounding prompt, citations, Q&A orchestration
+│   │   └── orchestration/           # Temporal workflow + activities + client
+│   └── eval/                        # golden-question regression suite (imports rag.py directly)
 ├── frontend/
-│   ├── .streamlit/config.toml
-│   ├── app.py                # Streamlit UI -- HTTP client of api.py, no direct RAG imports
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── .dockerignore
-├── docker-compose.yml        # wires both services together (see "Run with Docker")
-├── .gitignore
+│   ├── app.py                       # chatbot entrypoint
+│   ├── admin_app.py                 # admin login + monitoring, one page
+│   └── doc_assist/                  # chatbot UI components, API client, session/auth state
+├── docker-compose.yml                # api, worker, ui, admin-ui, Postgres, Redis, Temporal, Caddy
+├── Caddyfile                          # TLS termination config
 └── README.md
 ```
 
-`backend/api.py` is the only process that imports `rag.py`/`ingest.py` at
-runtime for serving traffic. `frontend/app.py` talks to it over HTTP;
-`backend/eval/run_eval.py` imports `rag.py` directly instead, since it's
-testing the pipeline, not the API.
+### Setup & run (Docker Compose)
 
-## Setup
-
-Requires Python 3.10+ and [`uv`](https://docs.astral.sh/uv/getting-started/installation/) installed.
-Each project gets its own virtual environment.
+This is the supported path — it wires up Postgres, Redis, Temporal, the worker, both frontends, and TLS together.
 
 ```bash
-cd rag-doc-assistant
+cp backend/.env.example backend/.env
+# edit backend/.env: set OPENAI_API_KEY, JWT_SECRET, ADMIN_PASSWORD
+# (JWT_SECRET: python -c "import secrets; print(secrets.token_hex(32))")
 
-# Backend
-cd backend
-uv venv
-uv pip install -r requirements.txt
-cp .env.example .env
-# then edit .env and set OPENAI_API_KEY=sk-...
-cd ..
-
-# Frontend
-cd frontend
-uv venv
-uv pip install -r requirements.txt
-cd ..
-```
-
-## Run
-
-**1. (Optional) Pre-ingest documents from the command line.**
-Drop PDFs into `backend/data/pdfs/` and, from `backend/`, run:
-
-```bash
-uv run ingest.py
-```
-
-This builds/updates the persisted Chroma store at `backend/chroma_db/`. You
-can skip this step entirely and just upload PDFs through the UI instead --
-both paths call the same ingestion code.
-
-**2. Run both processes.** The Streamlit UI is an HTTP client of a FastAPI
-serving layer -- start the API first, then the UI, in two terminals:
-
-```bash
-# Terminal 1 -- the API (retrieval/generation/ingestion live here)
-cd backend
-uv run uvicorn api:app --reload
-
-# Terminal 2 -- the Streamlit UI (talks to the API over HTTP)
-cd frontend
-uv run streamlit run app.py
-```
-
-Then open the URL Streamlit prints (usually `http://localhost:8501`). If the
-UI shows "Can't reach the API," the `uvicorn` process either isn't running
-or is on a different host/port than `app.py` expects — see `API_BASE_URL`
-below.
-
-By default `app.py` calls the API at `http://localhost:8000`. If you run the
-API somewhere else, point the UI at it:
-
-```bash
-API_BASE_URL=http://your-host:8000 uv run streamlit run app.py
-```
-
-**3. (Optional) Command-line sanity check without either process:**
-
-```bash
-cd backend
-uv run rag.py "How many days of PTO do new hires get?"
-```
-
-## Run with Docker
-
-Each project has its own `Dockerfile` (and its own, right-sized dependency
-set); `docker-compose.yml` at the repo root builds both and wires them
-together. The API's `/health` endpoint gates the UI's startup, and
-`backend/data/`, `backend/chroma_db/`, and `backend/reports/` are
-bind-mounted so ingested documents and the vector store persist across
-rebuilds.
-
-```bash
-# uses the OPENAI_API_KEY already in backend/.env (see Setup above)
 docker compose up --build
 ```
 
-Then open `http://localhost:8501`. The API is also reachable directly at
-`http://localhost:8000` (e.g. `curl http://localhost:8000/health`).
+Then, over HTTPS (Caddy issues a self-signed cert for local dev — accept the browser warning once, or trust its local CA, see the Caddyfile):
 
-Note: both images pin Python 3.12, not whatever version your local `.venv`
-uses -- `langchain-chroma` requires `numpy<2.0`, which has no prebuilt wheel
-for Python 3.13 on Linux, and the slim image has no C compiler to build it
-from source.
+- Chatbot: `https://localhost:8501`
+- API: `https://localhost:8000` (`curl -k https://localhost:8000/health`)
+- Admin app: `https://localhost:8502`
 
-## How it works
+`ADMIN_PASSWORD`, `JWT_EXPIRY_DAYS`, and a handful of other values in `backend/.env` are **seed values only** — they set the initial row in Postgres on first boot and are ignored after that. From then on, change them live via the admin app (password) or by editing the `config_settings` table directly (everything else) — see below.
 
-1. **Ingestion** (`ingest.py`): each PDF is loaded page-by-page with
-   `PyPDFLoader`, split into chunks with `RecursiveCharacterTextSplitter`,
-   embedded with `text-embedding-3-small`, and written into a persisted
-   Chroma collection at `backend/chroma_db`.
-2. **Retrieval** (`rag.py`): a question is embedded and matched against the
-   Chroma collection using MMR search (`k=4`) so the returned chunks are
-   relevant *and* diverse rather than near-duplicates of the same passage.
-3. **Generation** (`rag.py`): the retrieved chunks are inserted into a strict
-   grounding prompt sent to `gpt-4o-mini`. The model is instructed to answer
-   only from that context, and to reply with an exact fallback sentence if
-   the answer isn't in the retrieved passages.
-4. **Citations** (`rag.py` + `app.py`): every retrieved chunk's
-   `{"source", "page"}` metadata is deduplicated and shown under a "Sources"
-   section in the UI, so every answer is traceable back to an exact document
-   and page.
+### Configuration, live, no redeploy
 
-## Design decisions & rationale
+Almost everything operationally interesting lives in Postgres' `config_settings` table, cached through Redis with a short TTL, edited either directly in the database or (for the admin password) from the admin app itself:
 
-- **Chunk size 800 / overlap 150** (`ingest.py`, top of file): 800 characters
-  holds roughly one coherent paragraph or policy clause — enough for the
-  embedding to capture a complete idea without blending multiple unrelated
-  ideas into one vector. 150 characters of overlap (~18%) protects rules or
-  definitions that straddle a chunk boundary, so a fact split across two
-  chunks by the splitter is still retrievable from either one.
-- **MMR retrieval** (`rag.py`): plain top-k similarity search tends to return
-  several near-duplicate chunks of the same passage. MMR re-ranks for
-  relevance *and* diversity, so the k=4 chunks handed to the LLM cover more
-  of the actual document content.
-- **Strict grounding prompt** (`rag.py`): the system prompt forbids outside
-  knowledge and mandates the exact string `"I don't know based on the
-  provided documents."` when the context doesn't answer the question — this
-  is checked verbatim in code so the UI never silently shows a hallucinated
-  answer with fake sources.
-- **Persisted Chroma, not an in-memory list**: `Chroma(persist_directory=...)`
-  writes vectors and metadata to disk in `backend/chroma_db`, so the app doesn't
-  need to re-embed documents on every restart, and multiple app runs share
-  one durable knowledge base.
+- **`generation`** — system prompt, per-fallback response text, model, temperature, how many prior chat messages are replayed as context
+- **`retrieval`** — chunk count (`k`), search strategy
+- **`embeddings`** — embedding model name
+- **`pricing`** — per-token cost estimates feeding the admin dashboard
+- **`auth`** — admin password, JWT session lengths
+- **`rate_limit`** — failed-login lockout thresholds
 
-## Acceptance criteria
+Edit a row, and it takes effect app-wide within seconds — no code change, no restart.
 
-| ID | Requirement | How it's met |
-|----|-------------|---------------|
-| **M6S1** | Chunk size/overlap are intentional, documented constants with a written rationale. | `CHUNK_SIZE = 800` / `CHUNK_OVERLAP = 150` defined at the top of `ingest.py`, with the rationale in a comment directly above them and repeated above. |
-| **M6S2** | Embeddings are persisted in Chroma on disk (`backend/chroma_db`), not a Python list. | `ingest.get_vector_store()` and `rag.get_retriever()` both construct `Chroma(persist_directory=PERSIST_DIR, ...)` (resolved relative to `backend/`); nothing in the app holds embeddings in memory across runs. |
-| **M6S3** | Retrieval returns the relevant chunks for real questions; citations match content. | `rag.py` uses MMR similarity search (`k=4`) against the persisted collection, and the returned `Document` objects (with original metadata) are what both the LLM context and the citation list are built from — the same chunk text drives both. |
-| **M6S4** | Every answer shows the exact source document and page it came from. | Metadata `{"source": <filename>, "page": <page_number>}` is captured at ingestion (`ingest.load_and_split`) and rendered as a deduplicated "Sources" list in `app.py`. |
-| **M6S5** | Out-of-scope questions return `"I don't know based on the provided documents."` — no hallucination. | The system prompt in `rag.py` mandates this exact sentence when context is insufficient, and the app checks for it verbatim to suppress a misleading "Sources" list on that path. |
-| **M6S6** | A never-before-seen PDF works end-to-end just by uploading it — nothing hardcoded per document. | `app.py`'s file uploader saves any PDF to `backend/data/pdfs/` and calls the generic `ingest.ingest_files()` — there is no document-specific logic anywhere in the pipeline. |
+### Security notes
 
-## Error handling
+- User and admin authentication are fully separate: distinct JWT claims, distinct login endpoints, distinct frontends — a user token is structurally rejected by every admin-only endpoint and vice versa.
+- Login is rate-limited by both username and source IP (Redis-backed, fails open if Redis itself is down, since refusing every login over a rate-limiter hiccup is worse for an internal tool than the rare abuse window).
+- The generation prompt carries a code-level (non-admin-editable) instruction that retrieved document content and prior chat turns are untrusted data, not commands — defense against a malicious PDF or message trying to override the assistant's behavior.
+- The model is explicitly instructed to refuse a request that could help cause real-world harm, independent of and in addition to an OpenAI Moderation API pass on the raw input.
+- Uploads are content-hashed (SHA-256) for duplicate detection, not compared by filename, which is unreliable.
+- Browser-facing traffic is HTTPS via Caddy. Container-to-container traffic on the private Compose network is plain HTTP by design — see the Caddyfile's comments for the reasoning and what that would mean in a multi-host deployment.
 
-- **Missing API key**: both `rag.py`/`ingest.py` (CLI) and `app.py` (UI)
-  check for `OPENAI_API_KEY` up front and show a clear message instead of a
-  raw stack trace.
-- **No PDFs yet**: the UI shows an info banner, and asking a question before
-  any document is ingested returns the same "I don't know..." fallback
-  instead of erroring.
-- **Empty query**: the UI blocks submission with a warning; `rag.py`'s
-  `answer_question("")` returns a friendly prompt instead of calling the LLM.
-# Odyssey-port6-RAG
-# Odyssey-port6-RAG
+### Local (non-Docker) development
+
+Each of `backend/` and `frontend/` has its own `requirements.txt` and virtualenv — the frontend never imports `langchain`/`chromadb`/etc. directly, it's a pure HTTP client of the API.
+
+```bash
+# Backend
+cd backend && python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # set OPENAI_API_KEY, JWT_SECRET, ADMIN_PASSWORD
+uvicorn api:app --reload
+
+# Temporal + worker (ingestion won't run without these)
+temporal server start-dev
+python worker.py
+
+# Frontend (chatbot)
+cd frontend && python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+
+# Frontend (admin app)
+streamlit run admin_app.py --server.port 8502
+```
+
+Postgres and Redis are still required even outside Docker — point `DATABASE_URL` / `REDIS_URL` in `backend/.env` at wherever you're running them.
+
+### Eval suite
+
+`backend/eval/` runs a golden-question regression set directly against `rag.py` (not through the API), scoring recall, citation precision/recall, and refusal accuracy — useful for confirming a prompt or retrieval tuning change didn't regress answer quality.
+
+```bash
+cd backend
+python eval/run_eval.py
+```
