@@ -23,78 +23,43 @@ class Composer:
         store.pending_question = None
 
         if attached:
-            self._stage_upload(attached, store)
-
-        self._render_pending_upload(store)
+            self._upload(attached, store)
 
         return question
 
-    def _stage_upload(self, files, store: SessionStore) -> None:
-        """Uploading requires the admin password on every single call (not a
-        one-time "unlock") -- see api.require_admin_password. Files are
-        staged in session_state as plain {"name", "bytes"} dicts (not the
-        UploadedFile objects themselves) so they survive the reruns between
-        attaching them and confirming the password below.
+    def _upload(self, files, store: SessionStore) -> None:
+        """No admin password any more -- an upload just queues each file for
+        admin review (see api.ingest). Nothing is searchable yet; the
+        sidebar's pending-uploads section is what tells the user it's
+        waiting for approval, and picks up the switch to the real library
+        automatically once an admin approves it (session_store refreshes
+        both every rerun).
         """
         already_mine = sorted({f.name for f in files if store.is_ingested(f.name)})
         if already_mine:
             st.warning(
-                "Already in your library, skipped: "
-                + ", ".join(already_mine)
-                + ". Delete it from the Library first if you want to replace it."
+                "Already in your library or pending approval, skipped: " + ", ".join(already_mine)
             )
 
         new_files = [f for f in files if not store.is_ingested(f.name)]
-        if new_files:
-            st.session_state.pending_upload = [
-                {"name": f.name, "bytes": f.getvalue()} for f in new_files
-            ]
-
-    def _render_pending_upload(self, store: SessionStore) -> None:
-        pending = st.session_state.get("pending_upload")
-        if not pending:
+        if not new_files:
             return
 
-        names = ", ".join(p["name"] for p in pending)
-        st.info(f"Ready to upload: {names}")
-        admin_password = st.text_input(
-            "Admin password", type="password", key="admin-pw-upload"
-        )
-        col_confirm, col_cancel = st.columns(2)
-        with col_confirm:
-            confirm = st.button(
-                "Confirm upload", key="confirm-upload", type="primary", use_container_width=True
-            )
-        with col_cancel:
-            cancel = st.button("Cancel", key="cancel-upload", use_container_width=True)
-
-        if cancel:
-            st.session_state.pending_upload = None
-            st.rerun()
-            return
-        if not confirm:
-            return
-        if not admin_password:
-            st.error("Admin password required.")
-            return
-
-        with st.spinner(f"Ingesting {len(pending)} document(s)…"):
-            result = self.api.ingest(pending, admin_password)
+        with st.spinner(f"Uploading {len(new_files)} document(s)…"):
+            result = self.api.ingest([{"name": f.name, "bytes": f.getvalue()} for f in new_files])
 
         if not result["ok"]:
             st.error(result["error"])
             return
 
-        store.refresh_library()
-        st.session_state.pending_upload = None
-        skipped = result.get("skipped") or []
-        if skipped:
-            st.warning(
-                "Already exists, skipped: "
-                + ", ".join(skipped)
-                + ". Delete the existing file first, then re-upload."
-            )
-        st.rerun()
+        store.refresh_pending_uploads()
+        # No st.rerun() here -- these messages need to actually stay on
+        # screen to be read; the sidebar's pending list catches up on the
+        # next interaction (it re-fetches every rerun, see session_store.py).
+        if result["queued"]:
+            st.info("Waiting for admin approval: " + ", ".join(result["queued"]))
+        if result["skipped"]:
+            st.warning("Already exists, skipped: " + ", ".join(result["skipped"]))
 
     def _render_input(self, session_id: str, store: SessionStore) -> tuple[str, list]:
         """Returns (text, files). Uses the built-in attachment button when
@@ -117,7 +82,7 @@ class Composer:
                     key=f"uploader-{session_id}",
                 )
             if legacy:
-                self._stage_upload(legacy, store)
+                self._upload(legacy, store)
             text = st.chat_input(
                 "Ask about your documents…", key=f"chat-input-{session_id}"
             )

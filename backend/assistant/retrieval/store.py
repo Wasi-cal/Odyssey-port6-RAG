@@ -55,3 +55,13 @@ def get_retriever(k: int | None = None):
 def store_is_empty() -> bool:
     """True if the Chroma collection has no documents yet (no PDFs ingested)."""
     return _get_store()._collection.count() == 0
+
+
+def count_embeddings() -> int:
+    """Total chunks/vectors currently in the collection -- the admin
+    monitoring dashboard's "embeddings present" figure. Reads Chroma
+    directly rather than summing documents.chunk_count in Postgres, since
+    those two are only ever tolerant-of-drift, not guaranteed in lockstep
+    (see db.py/api.py's comments on the three stores getting out of sync).
+    """
+    return _get_store()._collection.count()

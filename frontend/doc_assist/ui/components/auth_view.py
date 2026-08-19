@@ -22,7 +22,7 @@ class AuthView:
         tab_login, tab_register = st.tabs(["Log in", "Create account"])
         with tab_login:
             self._render_login()
-            self._render_forgot_password()
+            st.caption("Forgot your password? Ask an admin to reset it.")
         with tab_register:
             self._render_register()
 
@@ -44,39 +44,6 @@ class AuthView:
             return
         auth.store_session(result["token"], result["username"])
         st.rerun()
-
-    def _render_forgot_password(self) -> None:
-        """No email system to send a reset link through, so recovery is
-        admin-assisted instead: whoever holds the admin password can set a
-        new password for any account directly (see
-        api.admin_reset_password) -- this doesn't need to already be
-        logged in as anyone, which is the whole point of a recovery path.
-        """
-        with st.expander("Forgot your password?"):
-            with st.form("forgot-password-form"):
-                username = st.text_input("Username", key="forgot-username")
-                new_password = st.text_input(
-                    "New password", type="password", key="forgot-new-password"
-                )
-                admin_password = st.text_input(
-                    "Admin password", type="password", key="forgot-admin-password"
-                )
-                submitted = st.form_submit_button("Reset password", use_container_width=True)
-
-            if not submitted:
-                return
-            if not username or not new_password or not admin_password:
-                st.error("Fill in all three fields.")
-                return
-            if len(new_password) < 8:
-                st.error("New password must be at least 8 characters.")
-                return
-
-            result = self.api.admin_reset_password(username, new_password, admin_password)
-            if not result["ok"]:
-                st.error(result["error"])
-                return
-            st.success("Password reset -- you can log in with it now.")
 
     def _render_register(self) -> None:
         with st.form("register-form"):

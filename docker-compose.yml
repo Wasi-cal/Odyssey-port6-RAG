@@ -146,16 +146,39 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # --- Separate admin app (login + monitoring, one page) -------------------
+  # Its own container/process from `ui` -- a different Streamlit app
+  # (admin_app.py), authenticated with the admin password (POST
+  # /admin/login) instead of a chatbot account, on its own port so it's
+  # reachable independently of the chatbot.
+  admin-ui:
+    build: ./frontend
+    command: >
+      streamlit run admin_app.py
+      --server.address 0.0.0.0
+      --server.port 8502
+      --server.headless true
+      --browser.gatherUsageStats false
+    environment:
+      - API_BASE_URL=http://api:8000
+    expose:
+      - "8502"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
   # --- TLS termination -----------------------------------------------------
-  # Fronts both ui and api on the SAME ports they used to publish directly
-  # (8501, 8000) -- now over HTTPS instead of plain HTTP. Neither service
-  # publishes its port itself anymore (see `expose` above); this is the only
-  # way in from the host.
+  # Fronts ui, api, and admin-ui on the SAME ports they'd otherwise publish
+  # directly (8501, 8000, 8502) -- now over HTTPS instead of plain HTTP.
+  # None of them publish their port themselves anymore (see `expose` above);
+  # this is the only way in from the host.
   caddy:
     image: caddy:2-alpine
     ports:
       - "8501:8501"
       - "8000:8000"
+      - "8502:8502"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -164,6 +187,8 @@ services:
       api:
         condition: service_healthy
       ui:
+        condition: service_started
+      admin-ui:
         condition: service_started
     restart: unless-stopped
 

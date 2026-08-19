@@ -7,13 +7,13 @@ lives in rag.py / ingest.py (and the assistant/ package underneath them),
 completely untouched by anything here.
 
 /ask calls rag.answer_question() directly -- a single fast request/response
-with nothing worth retrying independently. /ingest instead starts the
-Temporal workflow defined in assistant/orchestration/ (one activity per
-uploaded file, each retried independently) and awaits its result -- durable
-against a transient OpenAI rate-limit or a worker crash mid-batch, with the
-exact same {ingested, chunk_count} response contract as a direct call would
-have had. Requires a Temporal server + `uv run worker.py` running alongside
-this API; see assistant/orchestration/__init__.py.
+with nothing worth retrying independently. /ingest only stages an upload now
+(see pending_documents in assistant/db.py); the Temporal workflow defined in
+assistant/orchestration/ (one activity per file, each retried independently)
+only runs once an admin approves it via the separate admin app, from
+POST /admin/pending-documents/{id}/approve. Requires a Temporal server +
+`uv run worker.py` running alongside this API; see
+assistant/orchestration/__init__.py.
 
 Run with:
     uvicorn api:app --reload
@@ -32,19 +32,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import jwt
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from assistant import auth, config_store, db, rate_limit
+from assistant import auth, config_store, db, pricing, rate_limit
+from assistant.embeddings import resolve_embed_model_name
 from assistant.orchestration.client import get_temporal_client
 from assistant.orchestration.config import TASK_QUEUE
 from assistant.orchestration.workflows.ingestion_workflow import IngestDocumentsWorkflow
-from ingest import DATA_DIR, delete_document
+from assistant.retrieval.store import count_embeddings
+from ingest import DATA_DIR
 from rag import answer_question, format_citation
 
 _DATA_DIR_RESOLVED = DATA_DIR.resolve()
+# Uploads wait here (not DATA_DIR) until an admin approves them -- a sibling
+# of DATA_DIR under the same backend/data/ volume, so staging survives a
+# container restart.
+PENDING_DIR = DATA_DIR.parent / "pending"
 
 # The JWT cookie name the frontend sets (doc_assist/domain/auth.py) --
 # read here only as a fallback, see get_current_user.
@@ -87,9 +93,22 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid authentication token.")
 
 
-def require_admin_password(admin_password: str) -> None:
-    if not auth.verify_admin_password(admin_password):
-        raise HTTPException(status_code=403, detail="Incorrect admin password.")
+def get_current_admin(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> None:
+    """Every /admin/* endpoint except POST /admin/login depends on this --
+    verifies a distinct admin JWT (auth.create_admin_token), never the
+    regular user JWT get_current_user checks. No cookie fallback: the
+    separate admin app always sends a header, no plain-<a href> links.
+    """
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated as admin -- please log in.")
+    try:
+        auth.decode_admin_token(credentials.credentials)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Admin session expired -- please log in again.")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid admin authentication token.")
 
 
 # Truncation matches the frontend's own ChatSession.add_message title logic
@@ -150,7 +169,6 @@ class ChangePasswordRequest(BaseModel):
 class AdminResetPasswordRequest(BaseModel):
     username: str
     new_password: str
-    admin_password: str
 
 
 class AuditLogEntry(BaseModel):
@@ -158,6 +176,36 @@ class AuditLogEntry(BaseModel):
     filename: str
     performed_by: str
     performed_at: str
+
+
+class AdminLoginRequest(BaseModel):
+    admin_password: str
+
+
+class AdminTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class PendingDocumentInfo(BaseModel):
+    id: str
+    filename: str
+    uploaded_at: str
+
+
+class AdminPendingDocumentInfo(BaseModel):
+    id: str
+    filename: str
+    uploaded_by: str
+    uploaded_at: str
+
+
+class MonitoringResponse(BaseModel):
+    pending_approvals: int
+    embeddings_present: int
+    tokens_consumed: int
+    cost_usd: float
+    average_token_usage: float
 
 
 class AskRequest(BaseModel):
@@ -179,10 +227,9 @@ class AskResponse(BaseModel):
     title: str | None = None  # the session's current title, possibly just updated by this call -- None only if nothing changed and there wasn't one already
 
 
-class IngestResponse(BaseModel):
-    ingested: list[str]
-    chunk_count: int
-    skipped: list[str] = []  # names that already existed -- not (re-)ingested
+class UploadResponse(BaseModel):
+    queued: list[str]  # accepted, now awaiting admin approval
+    skipped: list[str] = []  # names already in the library or already pending
 
 
 class DocumentInfo(BaseModel):
@@ -326,18 +373,31 @@ def change_password(
     return {"changed": True}
 
 
-@app.post("/auth/admin-reset-password")
-def admin_reset_password(payload: AdminResetPasswordRequest) -> dict:
-    """Forgot-password recovery for an internal tool with no email system:
-    whoever holds the admin password can reset ANY account's password
-    directly, without needing to know the old one. Deliberately doesn't
-    require being logged in as anyone -- that's the whole point of a
-    recovery path -- so the admin password is the only thing gating it.
+@app.post("/admin/login", response_model=AdminTokenResponse)
+def admin_login(payload: AdminLoginRequest, request: Request) -> AdminTokenResponse:
+    """The only /admin/* endpoint that doesn't require get_current_admin --
+    this is what issues that token. Never called from the chatbot -- the
+    separate admin app is the only client. Rate-limited like user login:
+    ADMIN_PASSWORD is one shared secret, worth brute-force protecting too.
     """
-    require_admin_password(payload.admin_password)
+    client_ip = request.client.host if request.client else "unknown"
+    if rate_limit.is_locked_out("admin_ip", client_ip):
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again in a few minutes.")
+    if not auth.verify_admin_password(payload.admin_password):
+        rate_limit.record_failure("admin_ip", client_ip)
+        raise HTTPException(status_code=401, detail="Incorrect admin password.")
+    rate_limit.clear_failures("admin_ip", client_ip)
+    return AdminTokenResponse(access_token=auth.create_admin_token())
+
+
+@app.post("/admin/reset-password")
+def admin_reset_password(payload: AdminResetPasswordRequest, _: None = Depends(get_current_admin)) -> dict:
+    """Forgot-password recovery for an internal tool with no email system --
+    the admin app resets any account's password directly, no old password
+    needed. Lives under the admin app now, not the chatbot's login screen.
+    """
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
-
     username = payload.username.strip()
     if not db.set_password_hash(username, auth.hash_password(payload.new_password)):
         raise HTTPException(status_code=404, detail="No such user.")
@@ -345,16 +405,90 @@ def admin_reset_password(payload: AdminResetPasswordRequest) -> dict:
 
 
 @app.get("/admin/audit-log", response_model=list[AuditLogEntry])
-def get_audit_log(user_id: str = Depends(get_current_user)) -> list[AuditLogEntry]:
-    """Who uploaded/deleted what, and when -- see db.admin_audit_log's
-    comment for why this exists (the admin password itself is a shared
-    secret, not a per-user credential, so it alone doesn't say who used it;
-    this does, since every /ingest and delete call is authenticated as a
-    specific logged-in user before it even checks that password). Viewing
-    this only requires being logged in, not the admin password -- reading
-    the log isn't a mutating action on the library the way upload/delete are.
+def get_audit_log(_: None = Depends(get_current_admin)) -> list[AuditLogEntry]:
+    """Who uploaded what, and when -- see db.admin_audit_log's comment
+    (the admin password is a shared secret, so it alone doesn't say who
+    used it; every upload is attributed to the user who requested it,
+    recorded on approval). Admin-only -- moved out of the chatbot sidebar.
     """
     return [AuditLogEntry(**row) for row in db.list_admin_audit_log()]
+
+
+@app.get("/admin/pending-documents", response_model=list[AdminPendingDocumentInfo])
+def list_pending_for_admin(_: None = Depends(get_current_admin)) -> list[AdminPendingDocumentInfo]:
+    """Every not-yet-reviewed upload, across all users -- the approval queue."""
+    return [AdminPendingDocumentInfo(**d) for d in db.list_all_pending_documents()]
+
+
+@app.post("/admin/pending-documents/{pending_id}/approve")
+async def approve_pending_document(pending_id: str, _: None = Depends(get_current_admin)) -> dict:
+    """Runs the same ingestion pipeline /ingest used to run inline before --
+    now triggered by admin approval instead of the uploader's own admin
+    password. Moves the staged file into DATA_DIR first (matching where
+    /ingest used to write before running the workflow, so chunk metadata's
+    "source" and get_document's lookup both see the real filename) --
+    left in DATA_DIR even on a failed workflow, so re-approving retries
+    cleanly rather than losing the file.
+    """
+    pending = db.get_pending_document(pending_id)
+    if pending is None or pending["status"] != "pending":
+        raise HTTPException(status_code=404, detail="No such pending upload.")
+
+    staged_path = Path(pending["staged_path"])
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    final_path = DATA_DIR / pending["filename"]
+    if staged_path.is_file():
+        staged_path.replace(final_path)
+    elif not final_path.is_file():
+        raise HTTPException(status_code=404, detail="Staged file is missing on disk.")
+
+    try:
+        client = await get_temporal_client()
+        results = await client.execute_workflow(
+            IngestDocumentsWorkflow.run,
+            [str(final_path)],
+            id=f"ingest-{uuid.uuid4()}",
+            task_queue=TASK_QUEUE,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_unwrap_temporal_error(e)) from e
+
+    chunk_count = results[0]["chunk_count"]
+    embed_tokens = results[0]["embed_tokens"]
+
+    db.add_document(pending["uploaded_by"], pending["filename"], chunk_count)
+    db.log_admin_action("upload", pending["filename"], pending["uploaded_by"])
+    db.mark_pending_approved(pending_id, chunk_count)
+    if embed_tokens:
+        cost = pricing.embedding_cost_usd(embed_tokens)
+        db.log_token_usage("embedding", resolve_embed_model_name(), None, None, embed_tokens, cost)
+
+    return {"approved": pending["filename"], "chunk_count": chunk_count}
+
+
+@app.post("/admin/pending-documents/{pending_id}/reject")
+def reject_pending_document(pending_id: str, _: None = Depends(get_current_admin)) -> dict:
+    pending = db.get_pending_document(pending_id)
+    if pending is None or pending["status"] != "pending":
+        raise HTTPException(status_code=404, detail="No such pending upload.")
+
+    staged_path = Path(pending["staged_path"])
+    if staged_path.is_file():
+        staged_path.unlink()
+    db.mark_pending_rejected(pending_id)
+    return {"rejected": pending["filename"]}
+
+
+@app.get("/admin/monitoring", response_model=MonitoringResponse)
+def get_monitoring(_: None = Depends(get_current_admin)) -> MonitoringResponse:
+    usage = db.get_usage_summary()
+    return MonitoringResponse(
+        pending_approvals=db.count_pending_documents(),
+        embeddings_present=count_embeddings(),
+        tokens_consumed=usage["tokens_consumed"],
+        cost_usd=usage["cost_usd"],
+        average_token_usage=usage["average_token_usage"],
+    )
 
 
 @app.get("/config")
@@ -364,9 +498,16 @@ def get_config(user_id: str = Depends(get_current_user)) -> dict:
     mainly for confirming a direct Postgres edit to config_settings has
     taken effect, without needing DB access to check. Requires login -- it's
     a debug view, not something to leave open to anyone unauthenticated.
+
+    Strips auth/admin_password specifically -- that row lives in the same
+    config_settings table (see config_store.seed_defaults) so the separate
+    admin app can read it live, but this endpoint is reachable by ANY logged-
+    in chatbot user, not just an admin, and must never hand that secret back.
     """
     try:
-        return config_store.get_all()
+        cfg = config_store.get_all()
+        cfg.get("auth", {}).pop("admin_password", None)
+        return cfg
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Config unavailable: {e}") from e
 
@@ -411,6 +552,14 @@ def ask(payload: AskRequest, user_id: str = Depends(get_current_user)) -> AskRes
     raw_source_filenames = [s["source"] for s in result.sources]
 
     _log_query(question, result.num_chunks_retrieved, latency_ms, raw_source_filenames)
+    if result.total_tokens is not None:
+        try:
+            cost = pricing.chat_cost_usd(result.prompt_tokens or 0, result.completion_tokens or 0)
+            db.log_token_usage(
+                "chat", result.model, result.prompt_tokens, result.completion_tokens, result.total_tokens, cost
+            )
+        except Exception:
+            pass  # best-effort, matching _log_query -- never break /ask over logging
 
     meta = {
         "sources": [s.model_dump() for s in formatted_sources],
@@ -447,68 +596,47 @@ def ask(payload: AskRequest, user_id: str = Depends(get_current_user)) -> AskRes
     )
 
 
-@app.post("/ingest", response_model=IngestResponse)
+@app.post("/ingest", response_model=UploadResponse)
 async def ingest_endpoint(
-    files: list[UploadFile] = File(...),
-    admin_password: str = Form(...),
-    user_id: str = Depends(get_current_user),
-) -> IngestResponse:
-    require_admin_password(admin_password)
-
+    files: list[UploadFile] = File(...), user_id: str = Depends(get_current_user)
+) -> UploadResponse:
+    """Stages each upload for admin review -- no admin password needed here
+    any more, and nothing is ingested/searchable until an admin approves it
+    (see POST /admin/pending-documents/{id}/approve).
+    """
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    # Checked against Postgres (the same source /library reads), not disk --
-    # filenames are the shared identity a document is stored/retrieved under
-    # (one physical file, one set of Chroma chunks, for everyone), so an
-    # existing name is a global collision, not just a this-user-already-has-
-    # it check. Checking Postgres rather than disk keeps this in lockstep
-    # with what the library actually shows: a stray file left on disk by a
-    # prior partial failure, with no matching library row, is *not* treated
-    # as a collision here -- it gets overwritten, which is the correct
-    # recovery, not a false "already exists".
-    existing_filenames = db.list_all_filenames()
+    PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    # Checked against both the live library AND anything already queued --
+    # filenames are the shared identity a document is stored/retrieved
+    # under, so a name can't be claimed twice before it's even reviewed.
+    reserved = db.list_all_filenames() | db.list_pending_filenames()
 
-    saved_paths = []
-    filenames = []
+    queued = []
     skipped = []
     for uploaded in files:
         name = uploaded.filename or ""
         if not name.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail=f"{name!r} is not a PDF.")
-        if name in existing_filenames:
+        if name in reserved:
             skipped.append(name)
             continue
-        dest = DATA_DIR / name
+        dest = PENDING_DIR / name
         dest.write_bytes(await uploaded.read())
-        saved_paths.append(dest)
-        filenames.append(name)
+        db.create_pending_document(str(uuid.uuid4()), name, str(dest), user_id)
+        reserved.add(name)
+        queued.append(name)
 
-    if not saved_paths:
-        return IngestResponse(ingested=[], chunk_count=0, skipped=skipped)
+    return UploadResponse(queued=queued, skipped=skipped)
 
-    try:
-        # Runs as a Temporal workflow (one activity per file, each
-        # independently retried) instead of calling ingest_files() directly
-        # -- same underlying pipeline, now durable against a transient
-        # OpenAI rate-limit or a worker crash mid-batch. See
-        # assistant/orchestration/ for the workflow/activity definitions.
-        client = await get_temporal_client()
-        chunk_counts = await client.execute_workflow(
-            IngestDocumentsWorkflow.run,
-            [str(p) for p in saved_paths],
-            id=f"ingest-{uuid.uuid4()}",
-            task_queue=TASK_QUEUE,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_unwrap_temporal_error(e)) from e
 
-    for filename, chunk_count in zip(filenames, chunk_counts):
-        db.add_document(user_id, filename, chunk_count)
-        db.log_admin_action("upload", filename, user_id)
-
-    return IngestResponse(ingested=filenames, chunk_count=sum(chunk_counts), skipped=skipped)
+@app.get("/documents/pending", response_model=list[PendingDocumentInfo])
+def get_pending_documents(user_id: str = Depends(get_current_user)) -> list[PendingDocumentInfo]:
+    """This user's own uploads still awaiting admin approval -- what the
+    chatbot sidebar shows as "waiting for admin approval".
+    """
+    return [PendingDocumentInfo(**d) for d in db.list_pending_documents_for_user(user_id)]
 
 
 @app.get("/library", response_model=list[DocumentInfo])
@@ -553,8 +681,7 @@ def get_document(filename: str, user_id: str = Depends(get_current_user)) -> Fil
     underlying document set (Chroma's collection) is already shared across
     all users for retrieval, same as it is today. Login is still required
     (via get_current_user's cookie fallback, since this is a plain link
-    click, not a fetch call) -- just not the separate admin password, which
-    only gates changing the library, not reading from it.
+    click, not a fetch call).
     """
     safe_name = Path(filename).name
     path = _DATA_DIR_RESOLVED / safe_name
@@ -566,43 +693,3 @@ def get_document(filename: str, user_id: str = Depends(get_current_user)) -> Fil
         filename=safe_name,
         content_disposition_type="inline",
     )
-
-
-@app.delete("/documents/{filename}")
-def delete_document_endpoint(
-    filename: str,
-    x_admin_password: str = Header(...),
-    user_id: str = Depends(get_current_user),
-) -> dict:
-    """Deletes a document everywhere: its chunks from Chroma, the raw PDF
-    from disk, and its library row (see db.delete_document). Global, not
-    scoped to whichever user clicks delete -- there is one shared vector
-    store collection for everyone, so a document either exists for
-    everyone or, after this, no one.
-
-    Requires the admin password on every single call (not a persistent
-    "unlocked" session) -- see require_admin_password.
-
-    Tolerates the three stores (disk, Chroma, Postgres) already being out of
-    sync with each other -- e.g. a prior partial failure, or the Chroma
-    collection having been wiped directly -- rather than requiring all three
-    to agree before doing anything. 404 only if there's genuinely nothing
-    to clean up in any of them; each cleanup step is itself a safe no-op
-    if that particular store never had this filename to begin with.
-    """
-    require_admin_password(x_admin_password)
-
-    safe_name = Path(filename).name
-    path = _DATA_DIR_RESOLVED / safe_name
-
-    file_exists = path.is_file() and path.suffix.lower() == ".pdf"
-    if not file_exists and not db.document_exists(safe_name):
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    delete_document(safe_name)  # Chroma chunks -- no-op if there aren't any
-    if file_exists:
-        path.unlink()
-    db.delete_document(safe_name)  # no-op if there's no row
-    db.log_admin_action("delete", safe_name, user_id)
-
-    return {"deleted": safe_name}

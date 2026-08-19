@@ -8,6 +8,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
+from ..embeddings import count_tokens
 from ..openai_key import require_openai_api_key
 from ..paths import DATA_DIR
 from .boilerplate import strip_boilerplate
@@ -66,34 +67,39 @@ def load_and_split(pdf_paths: list[Path]) -> list[Document]:
     return all_chunks
 
 
-def ingest_files(pdf_paths: list[Path]) -> int:
-    """Embed and persist the given PDFs into Chroma. Returns chunk count added.
+def ingest_files(pdf_paths: list[Path]) -> tuple[int, int]:
+    """Embed and persist the given PDFs into Chroma. Returns
+    (chunk_count, embed_tokens) -- embed_tokens is an estimate (see
+    embeddings.count_tokens) of how many tokens were sent to the embedding
+    model, for the admin monitoring dashboard's cost figures.
 
     Idempotent per filename: clears any existing chunks for each of these
     exact filenames before adding the fresh ones, so calling this twice for
     the same file (e.g. a retry, or recovering a filename whose Postgres row
     or disk copy got out of sync with Chroma some other way) can never leave
-    duplicate/stale vectors sitting alongside the new ones -- api.py's
-    /ingest also rejects a duplicate upload outright, but this is the
-    pipeline's own defense regardless of what called it (CLI, API, or a
+    duplicate/stale vectors sitting alongside the new ones -- the admin
+    approve endpoint also rejects a duplicate filename outright, but this is
+    the pipeline's own defense regardless of what called it (CLI, API, or a
     Temporal activity retry).
     """
     require_openai_api_key()
     if not pdf_paths:
-        return 0
+        return 0, 0
 
     chunks = load_and_split(pdf_paths)
     if not chunks:
-        return 0
+        return 0, 0
+
+    embed_tokens = count_tokens([c.page_content for c in chunks])
 
     store = get_vector_store()
     for pdf_path in pdf_paths:
         store._collection.delete(where={"source": pdf_path.name})
     store.add_documents(chunks)
-    return len(chunks)
+    return len(chunks), embed_tokens
 
 
-def ingest_all() -> int:
+def ingest_all() -> tuple[int, int]:
     """Rebuild/update the store from every PDF currently in data/pdfs/."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     pdf_paths = sorted(DATA_DIR.glob("*.pdf"))

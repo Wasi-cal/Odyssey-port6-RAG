@@ -16,7 +16,7 @@ ever read from it.
 import sys
 
 from assistant.ingestion.pipeline import ingest_all, ingest_files, load_and_split
-from assistant.ingestion.store import delete_document, get_vector_store
+from assistant.ingestion.store import get_vector_store
 from assistant.openai_key import require_openai_api_key
 from assistant.paths import COLLECTION_NAME, DATA_DIR, PERSIST_DIR
 
@@ -28,7 +28,6 @@ __all__ = [
     "get_vector_store",
     "ingest_files",
     "ingest_all",
-    "delete_document",
 ]
 
 if __name__ == "__main__":
@@ -46,5 +45,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     print(f"Found {len(pdf_paths)} PDF(s): {[p.name for p in pdf_paths]}")
-    count = ingest_files(pdf_paths)
-    print(f"Ingested {count} chunks into '{COLLECTION_NAME}' at {PERSIST_DIR}")
+    chunk_count, embed_tokens = ingest_files(pdf_paths)
+    print(
+        f"Ingested {chunk_count} chunks ({embed_tokens} embedding tokens) "
+        f"into '{COLLECTION_NAME}' at {PERSIST_DIR}"
+    )

@@ -102,9 +102,9 @@ CREATE TABLE IF NOT EXISTS config_settings (
 
 -- Who did what to the shared document library, and when -- the admin
 -- password alone doesn't say WHO used it, since it's a shared secret, not a
--- per-user credential. Every /ingest and DELETE /documents call is
--- authenticated as some logged-in user before it ever checks the admin
--- password, so that username is what gets recorded here.
+-- per-user credential. An upload is recorded here once an admin approves it
+-- (see pending_documents below), authenticated as whoever originally
+-- uploaded it, not whoever approved it.
 CREATE TABLE IF NOT EXISTS admin_audit_log (
     id BIGSERIAL PRIMARY KEY,
     action TEXT NOT NULL CHECK (action IN ('upload', 'delete')),
@@ -113,6 +113,44 @@ CREATE TABLE IF NOT EXISTS admin_audit_log (
     performed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_time ON admin_audit_log(performed_at DESC);
+
+-- A user's upload is staged here, not ingested immediately -- file bytes
+-- live at staged_path (under a separate PENDING_DIR, not DATA_DIR) until an
+-- admin approves or rejects it from the admin app. Approving runs the same
+-- ingestion pipeline /ingest used to run inline before, then inserts into
+-- `documents`; rejecting just deletes this row and the staged file. Rows
+-- are kept (status updated, not deleted) after review, so "pending
+-- approvals" (status = 'pending') and admin review history read from the
+-- same table.
+CREATE TABLE IF NOT EXISTS pending_documents (
+    id TEXT PRIMARY KEY,
+    filename TEXT NOT NULL,
+    staged_path TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    chunk_count INTEGER,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    reviewed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_documents(status, uploaded_at);
+
+-- One row per OpenAI call that has a token cost -- a chat completion (/ask)
+-- or an embedding batch (an approved upload's ingestion). cost_usd is an
+-- ESTIMATE from assistant/pricing.py's hardcoded per-token rates, not a
+-- billing-accurate figure -- OpenAI doesn't return actual dollar cost per
+-- call. Feeds the admin monitoring dashboard's tokens/cost/average-usage
+-- figures.
+CREATE TABLE IF NOT EXISTS token_usage_log (
+    id BIGSERIAL PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('chat', 'embedding')),
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER NOT NULL,
+    cost_usd NUMERIC(12, 6) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_token_usage_time ON token_usage_log(created_at DESC);
 """
 
 
@@ -247,22 +285,11 @@ def add_document(user_id: str, filename: str, chunk_count: int) -> None:
         )
 
 
-def delete_document(filename: str) -> None:
-    with _pool.connection() as conn:
-        conn.execute("DELETE FROM documents WHERE filename = %s", (filename,))
-
-
-def document_exists(filename: str) -> bool:
-    with _pool.connection() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM documents WHERE filename = %s", (filename,)
-        ).fetchone()
-    return row is not None
-
-
 def list_all_filenames() -> set[str]:
     """Every currently-known filename -- what /ingest checks a new upload's
-    name against to reject a duplicate (see api.py).
+    name against to reject a duplicate (see api.py). Combined with
+    list_pending_filenames() there, so a name already awaiting approval
+    can't be queued a second time either.
     """
     with _pool.connection() as conn:
         rows = conn.execute("SELECT filename FROM documents").fetchall()
@@ -389,3 +416,135 @@ def list_admin_audit_log(limit: int = 50) -> list[dict]:
         {"action": r[0], "filename": r[1], "performed_by": r[2], "performed_at": r[3].isoformat()}
         for r in rows
     ]
+
+
+# -- pending_documents (upload-approval queue) --------------------------------
+
+
+def create_pending_document(pending_id: str, filename: str, staged_path: str, uploaded_by: str) -> None:
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO pending_documents (id, filename, staged_path, uploaded_by) "
+            "VALUES (%s, %s, %s, %s)",
+            (pending_id, filename, staged_path, uploaded_by),
+        )
+
+
+def list_pending_filenames() -> set[str]:
+    """Filenames currently awaiting approval -- combined with
+    list_all_filenames() in api.py so a name already queued can't be
+    uploaded a second time by someone else before it's reviewed.
+    """
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT filename FROM pending_documents WHERE status = 'pending'"
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+def list_pending_documents_for_user(user_id: str) -> list[dict]:
+    """A user's own not-yet-reviewed uploads -- what the chatbot sidebar
+    shows as "waiting for admin approval". Never another user's pending
+    uploads; see list_all_pending_documents for the admin app's view.
+    """
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id, filename, uploaded_at FROM pending_documents "
+            "WHERE uploaded_by = %s AND status = 'pending' ORDER BY uploaded_at ASC",
+            (user_id,),
+        ).fetchall()
+    return [{"id": r[0], "filename": r[1], "uploaded_at": r[2].isoformat()} for r in rows]
+
+
+def list_all_pending_documents() -> list[dict]:
+    """Every not-yet-reviewed upload, across all users -- the admin app's
+    approval queue.
+    """
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id, filename, uploaded_by, uploaded_at FROM pending_documents "
+            "WHERE status = 'pending' ORDER BY uploaded_at ASC"
+        ).fetchall()
+    return [
+        {"id": r[0], "filename": r[1], "uploaded_by": r[2], "uploaded_at": r[3].isoformat()}
+        for r in rows
+    ]
+
+
+def get_pending_document(pending_id: str) -> dict | None:
+    with _pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id, filename, staged_path, uploaded_by, status FROM pending_documents "
+            "WHERE id = %s",
+            (pending_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "filename": row[1], "staged_path": row[2], "uploaded_by": row[3], "status": row[4]}
+
+
+def mark_pending_approved(pending_id: str, chunk_count: int) -> None:
+    with _pool.connection() as conn:
+        conn.execute(
+            "UPDATE pending_documents SET status = 'approved', chunk_count = %s, "
+            "reviewed_at = now() WHERE id = %s",
+            (chunk_count, pending_id),
+        )
+
+
+def mark_pending_rejected(pending_id: str) -> None:
+    with _pool.connection() as conn:
+        conn.execute(
+            "UPDATE pending_documents SET status = 'rejected', reviewed_at = now() WHERE id = %s",
+            (pending_id,),
+        )
+
+
+def count_pending_documents() -> int:
+    with _pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM pending_documents WHERE status = 'pending'"
+        ).fetchone()
+    return row[0]
+
+
+# -- token_usage_log (admin monitoring) ---------------------------------------
+
+
+def log_token_usage(
+    kind: str,
+    model: str,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    total_tokens: int,
+    cost_usd: float,
+) -> None:
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO token_usage_log "
+            "(kind, model, prompt_tokens, completion_tokens, total_tokens, cost_usd) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (kind, model, prompt_tokens, completion_tokens, total_tokens, cost_usd),
+        )
+
+
+def get_usage_summary() -> dict:
+    """Aggregate figures for the admin monitoring dashboard: total tokens
+    consumed and estimated cost across every logged call (chat +
+    embedding), plus the average tokens per /ask call specifically --
+    embedding batches vary wildly in size with document length, so folding
+    them into the same average would make "average usage" meaningless as a
+    per-question figure.
+    """
+    with _pool.connection() as conn:
+        totals = conn.execute(
+            "SELECT COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_usd), 0) FROM token_usage_log"
+        ).fetchone()
+        avg_chat = conn.execute(
+            "SELECT COALESCE(AVG(total_tokens), 0) FROM token_usage_log WHERE kind = 'chat'"
+        ).fetchone()
+    return {
+        "tokens_consumed": totals[0],
+        "cost_usd": float(totals[1]),
+        "average_token_usage": float(avg_chat[0]),
+    }

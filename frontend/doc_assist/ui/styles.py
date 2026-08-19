@@ -195,31 +195,13 @@ html, body, .stApp,
 .doc-row .doc-link { text-decoration: none; }
 .doc-row .doc-link:hover { color: #171B2E; text-decoration: underline; }
 
-/* Library delete button: small, centered, subdued -- distinct from the
-   full-width, left-justified treatment every other sidebar tertiary button
-   gets (+ New chat, history entries). */
-[data-testid="stSidebar"] [class*="st-key-delete-doc-"] button[data-testid="stBaseButton-tertiary"] {
-    justify-content: center;
-    padding: 4px;
-    min-height: 0;
-    color: #C4C7D1;
-}
-[data-testid="stSidebar"] [class*="st-key-delete-doc-"] button[data-testid="stBaseButton-tertiary"] > div {
-    justify-content: center;
-    width: auto;
-}
-[data-testid="stSidebar"] [class*="st-key-delete-doc-"] button[data-testid="stBaseButton-tertiary"]:hover {
-    color: #E5484D;
-    background: #FBEAEA;
-}
 .empty-row { font-size: 12px; color: #B4B8C4; padding: 4px 8px; line-height: 1.6; }
 
-.audit-row {
-    font-size: 11.5px; color: #6B7280; padding: 5px 8px; line-height: 1.5;
-    border-bottom: 1px solid #F0F1F5;
+.pending-row { opacity: 0.7; }
+.pending-badge {
+    font-size: 10.5px; color: #9A6B00; background: #FFF4DA;
+    border-radius: 6px; padding: 1px 6px; margin-left: auto; white-space: nowrap;
 }
-.audit-row:last-child { border-bottom: none; }
-.audit-row b { color: #3C4258; font-weight: 500; }
 
 /* ---- Empty-state hero ---- */
 @keyframes fadeUp {

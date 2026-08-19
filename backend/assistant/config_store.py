@@ -162,5 +162,66 @@ def seed_defaults() -> None:
                 "value": SEARCH_TYPE,
                 "description": "Chroma retriever search_type, e.g. 'mmr' or 'similarity'.",
             },
+            {
+                "category": "auth",
+                "key": "admin_password",
+                "value": os.environ.get("ADMIN_PASSWORD", ""),
+                "description": (
+                    "Shared password for the separate admin app's login (assistant/auth.py's "
+                    "verify_admin_password). Seeded once from env ADMIN_PASSWORD; edit this row "
+                    "directly to change it afterwards -- never returned by GET /config."
+                ),
+            },
+            {
+                "category": "auth",
+                "key": "jwt_expiry_days",
+                "value": int(os.environ.get("JWT_EXPIRY_DAYS", "7")),
+                "description": "How long a chatbot login stays valid before re-login is required.",
+            },
+            {
+                "category": "auth",
+                "key": "admin_jwt_expiry_hours",
+                "value": int(os.environ.get("ADMIN_JWT_EXPIRY_HOURS", "12")),
+                "description": "How long an admin app login stays valid before re-login is required.",
+            },
+            {
+                "category": "rate_limit",
+                "key": "max_attempts",
+                "value": 5,
+                "description": "Failed logins (per username or per IP) before a 5-minute lockout.",
+            },
+            {
+                "category": "rate_limit",
+                "key": "lockout_seconds",
+                "value": 5 * 60,
+                "description": "Lockout duration, in seconds, once max_attempts is hit.",
+            },
+            {
+                "category": "pricing",
+                "key": "chat_input_price_per_token",
+                "value": 0.15 / 1_000_000,
+                "description": "USD per prompt token, for the admin monitoring dashboard's cost estimate.",
+            },
+            {
+                "category": "pricing",
+                "key": "chat_output_price_per_token",
+                "value": 0.60 / 1_000_000,
+                "description": "USD per completion token, for the admin monitoring dashboard's cost estimate.",
+            },
+            {
+                "category": "pricing",
+                "key": "embedding_price_per_token",
+                "value": 0.02 / 1_000_000,
+                "description": "USD per embedded token, for the admin monitoring dashboard's cost estimate.",
+            },
+            {
+                "category": "embeddings",
+                "key": "embed_model_name",
+                "value": "text-embedding-3-small",
+                "description": (
+                    "OpenAI embedding model (assistant/embeddings.py). Changing this only affects "
+                    "newly-ingested documents -- existing Chroma vectors need a full re-ingest to match."
+                ),
+            },
         ]
     )

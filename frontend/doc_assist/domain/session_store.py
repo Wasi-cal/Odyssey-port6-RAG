@@ -42,6 +42,11 @@ class SessionStore:
             if fetched is not None:
                 st.session_state.library = fetched
 
+        # Unconditional, every rerun (not just once) -- this is how an admin
+        # approval elsewhere becomes visible here without the user doing
+        # anything: any interaction reruns the script, which re-fetches this.
+        self.refresh_pending_uploads()
+
         if "pending_question" not in st.session_state:
             st.session_state.pending_question = None
 
@@ -138,7 +143,9 @@ class SessionStore:
         return st.session_state.get("library") or []
 
     def is_ingested(self, filename: str) -> bool:
-        return any(entry["name"] == filename for entry in self.library)
+        return any(entry["name"] == filename for entry in self.library) or any(
+            p["filename"] == filename for p in self.pending_uploads
+        )
 
     def refresh_library(self) -> None:
         """A None result (request failed) leaves the existing library alone
@@ -149,16 +156,19 @@ class SessionStore:
         if fetched is not None:
             st.session_state.library = fetched
 
-    def delete_document(self, filename: str, admin_password: str) -> str | None:
-        """Deletes a document (everywhere -- see api.delete_document_endpoint)
-        and refreshes the library. Returns an error message on failure, None
-        on success.
+    # -- pending uploads (awaiting admin approval) --------------------------
+    @property
+    def pending_uploads(self) -> list[dict]:
+        return st.session_state.get("pending_uploads") or []
+
+    def refresh_pending_uploads(self) -> None:
+        """Same None-means-transient-failure rationale as refresh_library --
+        called on every rerun (see sidebar.py) so an admin's approval shows
+        up here without the user having to do anything else.
         """
-        result = self.api.delete_document(filename, admin_password)
-        if not result["ok"]:
-            return result["error"]
-        self.refresh_library()
-        return None
+        fetched = self.api.get_pending_documents()
+        if fetched is not None:
+            st.session_state.pending_uploads = fetched
 
     # -- pending question (set by a suggestion-chip click) ------------------
     @property

@@ -14,9 +14,11 @@ import os
 
 import redis
 
+from . import config_store
+
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-MAX_ATTEMPTS = 5
-LOCKOUT_SECONDS = 5 * 60
+_MAX_ATTEMPTS_DEFAULT = 5
+_LOCKOUT_SECONDS_DEFAULT = 5 * 60
 
 _redis = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -30,19 +32,23 @@ def is_locked_out(kind: str, identifier: str) -> bool:
         count = _redis.get(_key(kind, identifier))
     except redis.exceptions.RedisError:
         return False
-    return count is not None and int(count) >= MAX_ATTEMPTS
+    max_attempts = config_store.get("rate_limit", "max_attempts", _MAX_ATTEMPTS_DEFAULT)
+    return count is not None and int(count) >= max_attempts
 
 
 def record_failure(kind: str, identifier: str) -> None:
     """INCR then EXPIRE only on the first failure in a window -- so the
-    lockout clock is "MAX_ATTEMPTS failures within LOCKOUT_SECONDS of the
+    lockout clock is "max_attempts failures within lockout_seconds of the
     first one", not extended by every subsequent attempt.
     """
     try:
         key = _key(kind, identifier)
         count = _redis.incr(key)
         if count == 1:
-            _redis.expire(key, LOCKOUT_SECONDS)
+            lockout_seconds = config_store.get(
+                "rate_limit", "lockout_seconds", _LOCKOUT_SECONDS_DEFAULT
+            )
+            _redis.expire(key, lockout_seconds)
     except redis.exceptions.RedisError:
         pass
 

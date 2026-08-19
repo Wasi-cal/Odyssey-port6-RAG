@@ -35,6 +35,14 @@ class RagResult:
     sources: list[dict] = field(default_factory=list)  # [{"source":..., "page":..., "section":..., "subsection":...}, ...]
     num_chunks_retrieved: int = 0
     title: str | None = None  # a short chat-session title, from the same LLM call -- None if none was generated (e.g. the empty-store/no-docs early returns below, which never call the LLM)
+    # Token usage from the generation call, for the admin monitoring
+    # dashboard's cost/usage figures -- all None for the early-return paths
+    # below that never call the LLM at all (abuse/list-documents/empty-store/
+    # nothing-retrieved), since there's no cost to attribute to those.
+    model: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 # Matches system_prompt's "TITLE: ...\nANSWER: ..." envelope (see prompt.py)
@@ -231,6 +239,16 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
     )
     title, answer_text = _split_title_and_answer(response.content)
 
+    # LangChain's ChatOpenAI populates usage_metadata on every AIMessage --
+    # a standardized {"input_tokens", "output_tokens", "total_tokens"} dict,
+    # not OpenAI's own prompt_tokens/completion_tokens naming, but the same
+    # figures. Missing entirely only if a future model/provider swap doesn't
+    # support it; api.py treats total_tokens=None as "nothing to log".
+    usage = getattr(response, "usage_metadata", None) or {}
+    prompt_tokens = usage.get("input_tokens")
+    completion_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+
     # If the model correctly declined to answer (any of the fixed-response
     # paths), don't attach sources that would falsely imply the documents
     # supported a claim.
@@ -242,7 +260,16 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
         fallback_unrelated,
         fallback_unanswered,
     ):
-        return RagResult(answer=answer_text, sources=[], num_chunks_retrieved=len(docs), title=title)
+        return RagResult(
+            answer=answer_text,
+            sources=[],
+            num_chunks_retrieved=len(docs),
+            title=title,
+            model=generation_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
 
     # Sources come from only the [n] labels the model actually cited in its
     # answer, NOT from every chunk that was retrieved -- see format_context
@@ -256,4 +283,8 @@ def answer_question(question: str, previous_title: str | None = None) -> RagResu
         sources=dedupe_sources(cited_docs),
         num_chunks_retrieved=len(docs),
         title=title,
+        model=generation_model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
     )

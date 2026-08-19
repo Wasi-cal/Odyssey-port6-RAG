@@ -1,6 +1,4 @@
-"""Sidebar: brand mark, account row, "+ New chat", Library, Chat History,
-Admin activity.
-"""
+"""Sidebar: brand mark, account row, "+ New chat", Library, Chat History."""
 
 import html
 import urllib.parse
@@ -28,7 +26,6 @@ class Sidebar:
 
             self._render_library(store)
             self._render_history(store)
-            self._render_audit_log()
 
     def _render_brand(self) -> None:
         st.markdown(
@@ -72,69 +69,31 @@ class Sidebar:
 
     def _render_library(self, store: SessionStore) -> None:
         with st.expander("LIBRARY", expanded=True):
+            # No delete affordance here -- removing a document from the
+            # shared library is an admin-only action now, done from the
+            # separate admin app, not the chatbot.
             if store.library:
                 for entry in store.library:
                     name = entry["name"]
                     url = f"{PUBLIC_API_BASE_URL}/documents/{urllib.parse.quote(name)}"
-                    col_doc, col_delete = st.columns([9, 1], vertical_alignment="center")
-                    with col_doc:
-                        st.markdown(
-                            f'<div class="doc-row">{DOC_ICON_SVG}'
-                            f'<a class="doc-link" href="{html.escape(url)}" '
-                            f'target="_blank" rel="noopener">{html.escape(name)}</a></div>',
-                            unsafe_allow_html=True,
-                        )
-                    with col_delete:
-                        if st.button(
-                            "✕",
-                            key=f"delete-doc-{name}",
-                            type="tertiary",
-                            help=f"Delete {name}",
-                        ):
-                            st.session_state.pending_delete = name
-                            st.rerun()
-                self._render_pending_delete(store)
-            else:
+                    st.markdown(
+                        f'<div class="doc-row">{DOC_ICON_SVG}'
+                        f'<a class="doc-link" href="{html.escape(url)}" '
+                        f'target="_blank" rel="noopener">{html.escape(name)}</a></div>',
+                        unsafe_allow_html=True,
+                    )
+            elif not store.pending_uploads:
                 st.markdown(
                     '<div class="empty-row">No documents yet.</div>',
                     unsafe_allow_html=True,
                 )
-
-    def _render_pending_delete(self, store: SessionStore) -> None:
-        """Deleting requires the admin password on every single call (not a
-        one-time "unlock") -- see api.require_admin_password. Staged in
-        session_state rather than deleting on the ✕ click itself, so there's
-        a confirmation step and a place to enter that password.
-        """
-        filename = st.session_state.get("pending_delete")
-        if not filename:
-            return
-
-        st.warning(f"Delete **{filename}**? This removes it for everyone.")
-        admin_password = st.text_input(
-            "Admin password", type="password", key="admin-pw-delete"
-        )
-        col_confirm, col_cancel = st.columns(2)
-        with col_confirm:
-            confirm = st.button(
-                "Confirm delete", key="confirm-delete", type="primary", use_container_width=True
-            )
-        with col_cancel:
-            cancel = st.button("Cancel", key="cancel-delete", use_container_width=True)
-
-        if cancel:
-            st.session_state.pending_delete = None
-            st.rerun()
-        if confirm:
-            if not admin_password:
-                st.error("Admin password required.")
-                return
-            error = store.delete_document(filename, admin_password)
-            st.session_state.pending_delete = None
-            if error:
-                st.error(error)
-            else:
-                st.rerun()
+            for pending in store.pending_uploads:
+                st.markdown(
+                    f'<div class="doc-row pending-row">{DOC_ICON_SVG}'
+                    f'<span>{html.escape(pending["filename"])}</span>'
+                    f'<span class="pending-badge">Pending approval</span></div>',
+                    unsafe_allow_html=True,
+                )
 
     def _render_history(self, store: SessionStore) -> None:
         with st.expander("CHAT HISTORY", expanded=True):
@@ -152,32 +111,5 @@ class Sidebar:
             else:
                 st.markdown(
                     '<div class="empty-row">No past chats yet.</div>',
-                    unsafe_allow_html=True,
-                )
-
-    def _render_audit_log(self) -> None:
-        """Who uploaded/deleted what -- see db.admin_audit_log's comment for
-        why this exists (the admin password is a shared secret, so it alone
-        never says who used it; every /ingest and delete call is
-        authenticated as a specific logged-in user first, which is what
-        actually gets recorded). Collapsed by default -- this is an
-        accountability trail to check when something looks off, not
-        something to have open at all times.
-        """
-        with st.expander("ADMIN ACTIVITY", expanded=False):
-            entries = self.api.get_audit_log()
-            if not entries:
-                st.markdown(
-                    '<div class="empty-row">No admin activity yet.</div>',
-                    unsafe_allow_html=True,
-                )
-                return
-            for entry in entries:
-                action = "Uploaded" if entry["action"] == "upload" else "Deleted"
-                when = entry["performed_at"][:16].replace("T", " ")
-                st.markdown(
-                    f'<div class="audit-row">{action} '
-                    f'<b>{html.escape(entry["filename"])}</b> '
-                    f'&middot; {html.escape(entry["performed_by"])} &middot; {when}</div>',
                     unsafe_allow_html=True,
                 )

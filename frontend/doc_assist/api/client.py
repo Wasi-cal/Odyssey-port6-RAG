@@ -2,8 +2,6 @@
 calls live here -- this class only shapes requests/responses for the UI.
 """
 
-import urllib.parse
-
 import requests
 
 
@@ -96,42 +94,6 @@ class ApiClient:
         except requests.exceptions.RequestException:
             return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
 
-    def admin_reset_password(self, username: str, new_password: str, admin_password: str) -> dict:
-        """POST /auth/admin-reset-password -- forgot-password recovery,
-        gated by the admin password rather than the account's own (now-
-        forgotten) one. Returns {"ok": True} or {"ok": False, "error": "..."}.
-        Never raises."""
-        try:
-            resp = requests.post(
-                f"{self.base_url}/auth/admin-reset-password",
-                json={
-                    "username": username,
-                    "new_password": new_password,
-                    "admin_password": admin_password,
-                },
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                return {"ok": True}
-            return {"ok": False, "error": self._extract_error(resp)}
-        except requests.exceptions.RequestException:
-            return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
-
-    def get_audit_log(self) -> list[dict] | None:
-        """GET /admin/audit-log. Returns None on failure (distinct from a
-        genuinely empty log)."""
-        try:
-            resp = requests.get(
-                f"{self.base_url}/admin/audit-log", headers=self._auth_headers(), timeout=30
-            )
-            if self._check_unauthorized(resp):
-                return None
-            if resp.status_code == 200:
-                return resp.json()
-        except requests.exceptions.RequestException:
-            pass
-        return None
-
     # -- chat ------------------------------------------------------------
 
     def ask(self, question: str, session_id: str) -> tuple[str, dict | None]:
@@ -172,21 +134,20 @@ class ApiClient:
         except requests.exceptions.RequestException:
             return f"Error: Could not reach the API at {self.base_url}.", None
 
-    def ingest(self, files, admin_password: str) -> dict:
-        """POST /ingest (multipart PDFs + the admin password). `files` is a
-        list of {"name": str, "bytes": bytes} -- plain dicts, not
-        UploadedFile objects, so they survive being held in session_state
-        across the reruns between attaching files and confirming the admin
-        password (see composer.py). Returns either
-        {"ok": True, "ingested": [...], "chunk_count": N, "skipped": [...]}
-        or {"ok": False, "error": "..."}. Never raises.
+    def ingest(self, files) -> dict:
+        """POST /ingest (multipart PDFs). No admin password any more --
+        this only queues each file for admin review, it doesn't ingest it.
+        `files` is a list of {"name": str, "bytes": bytes} -- plain dicts,
+        not UploadedFile objects, so they survive being held in
+        session_state across reruns (see composer.py). Returns either
+        {"ok": True, "queued": [...], "skipped": [...]} or
+        {"ok": False, "error": "..."}. Never raises.
         """
         try:
             multipart = [("files", (f["name"], f["bytes"], "application/pdf")) for f in files]
             resp = requests.post(
                 f"{self.base_url}/ingest",
                 files=multipart,
-                data={"admin_password": admin_password},
                 headers=self._auth_headers(),
                 timeout=300,
             )
@@ -194,38 +155,28 @@ class ApiClient:
                 return {"ok": False, "error": "Your session expired. Please log in again."}
             if resp.status_code == 200:
                 data = resp.json()
-                return {
-                    "ok": True,
-                    "ingested": data.get("ingested", []),
-                    "chunk_count": data.get("chunk_count", 0),
-                    "skipped": data.get("skipped", []),
-                }
+                return {"ok": True, "queued": data.get("queued", []), "skipped": data.get("skipped", [])}
             return {"ok": False, "error": self._extract_error(resp)}
         except requests.exceptions.Timeout:
-            return {"ok": False, "error": "Ingestion timed out. Try again with fewer files."}
+            return {"ok": False, "error": "Upload timed out. Try again with fewer files."}
         except requests.exceptions.RequestException:
             return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
 
-    def delete_document(self, filename: str, admin_password: str) -> dict:
-        """DELETE /documents/{filename}, with the admin password as a
-        header. Returns either {"ok": True} or {"ok": False, "error": "..."}.
-        Never raises.
-        """
+    def get_pending_documents(self) -> list[dict] | None:
+        """GET /documents/pending -- this user's own uploads still awaiting
+        admin approval. Returns None on failure (distinct from genuinely
+        none pending)."""
         try:
-            resp = requests.delete(
-                f"{self.base_url}/documents/{urllib.parse.quote(filename, safe='')}",
-                headers={**self._auth_headers(), "X-Admin-Password": admin_password},
-                timeout=30,
+            resp = requests.get(
+                f"{self.base_url}/documents/pending", headers=self._auth_headers(), timeout=30
             )
             if self._check_unauthorized(resp):
-                return {"ok": False, "error": "Your session expired. Please log in again."}
+                return None
             if resp.status_code == 200:
-                return {"ok": True}
-            return {"ok": False, "error": self._extract_error(resp)}
-        except requests.exceptions.Timeout:
-            return {"ok": False, "error": "Delete timed out."}
+                return resp.json()
         except requests.exceptions.RequestException:
-            return {"ok": False, "error": f"Could not reach the API at {self.base_url}."}
+            pass
+        return None
 
     def get_library(self) -> list[dict] | None:
         """GET /library -- global, not scoped to a user (see api.get_library).

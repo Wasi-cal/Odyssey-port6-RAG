@@ -22,3 +22,8 @@ localhost:8000 {
 	tls internal
 	reverse_proxy api:8000
 }
+
+localhost:8502 {
+	tls internal
+	reverse_proxy admin-ui:8502
+}

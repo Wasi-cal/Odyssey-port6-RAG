@@ -40,11 +40,12 @@ class IngestDocumentsWorkflow:
     """
 
     @workflow.run
-    async def run(self, pdf_paths: list[str]) -> list[int]:
-        """Returns one chunk count per input path, same order as pdf_paths --
-        callers that only want the batch total can sum() this themselves;
-        api.py needs the per-file breakdown to record accurate library
-        entries per document.
+    async def run(self, pdf_paths: list[str]) -> list[dict]:
+        """Returns one {"chunk_count", "embed_tokens"} dict per input path,
+        same order as pdf_paths -- callers that only want the batch totals
+        can sum() the fields themselves; api.py's admin approve endpoint
+        needs the per-file breakdown to record accurate library entries and
+        usage-log rows per document.
         """
         return await asyncio.gather(
             *[
