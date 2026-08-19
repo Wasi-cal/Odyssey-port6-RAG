@@ -16,6 +16,7 @@ from ..openai_key import require_openai_api_key
 from ..paths import DATA_DIR
 from .citations import dedupe_sources, extract_cited_docs, format_context
 from .prompt import (
+    CONDENSE_QUESTION_SYSTEM_PROMPT,
     FALLBACK_ABUSE,
     FALLBACK_DANGEROUS,
     FALLBACK_GIBBERISH,
@@ -78,8 +79,9 @@ def _build_history_messages(chat_history: list[dict] | None) -> list:
     lets the model resolve a follow-up question ("what about part-time
     employees?") against what was actually discussed earlier in the same
     session, instead of treating every question as if it were the first.
-    Retrieval itself still only searches on the current question's text;
-    only the generation call sees prior turns.
+    Also fed to _condense_question so retrieval itself can resolve an
+    elliptical follow-up into a standalone search query, not just the
+    generation call.
     """
     limit = config_store.get("generation", "history_messages", _HISTORY_MESSAGES_DEFAULT)
     trimmed = (chat_history or [])[-limit:] if limit > 0 else []
@@ -89,6 +91,37 @@ def _build_history_messages(chat_history: list[dict] | None) -> list:
         cls = HumanMessage if m.get("role") == "user" else AIMessage
         messages.append(cls(content=content))
     return messages
+
+
+# Rewrites a follow-up question into a standalone search query before
+# retrieval, using the conversation so far -- e.g. "can I take 12 this
+# month" alone may not retrieve the WFH policy chunk as reliably as
+# "can I take 12 work-from-home days this month" does once it's clear
+# from an earlier turn that "this" means work-from-home. This only
+# reformulates the RETRIEVAL query; the generation call downstream still
+# sees the user's original wording via {question}, and still judges rule
+# 2 against what was actually asked, not this rewritten version.
+def _condense_question(
+    question: str, history_messages: list, model: str, condense_prompt: str
+) -> str:
+    """Returns `question` unchanged when there's no history to resolve
+    against (a session's first message) -- no need to pay for an LLM call
+    when there's nothing it could add.
+    """
+    if not history_messages:
+        return question
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", condense_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{question}"),
+        ]
+    )
+    llm = ChatOpenAI(model=model, temperature=0.0)
+    chain = prompt | llm
+    response = chain.invoke({"chat_history": history_messages, "question": question})
+    condensed = (response.content or "").strip()
+    return condensed or question
 
 
 def _split_title_and_answer(raw_text: str) -> tuple[str | None, str]:
@@ -185,8 +218,12 @@ def answer_question(
     is given to the generation model as prior turns -- see
     _build_history_messages -- so it can resolve a follow-up question
     against what was actually discussed earlier, e.g. "what about part-time
-    employees?" after a question about full-time PTO. Retrieval is
-    unaffected: it still searches on only the current question's text.
+    employees?" after a question about full-time PTO. The same history also
+    feeds _condense_question, which rewrites the follow-up into a
+    standalone search query before retrieval runs -- retrieval sees that
+    rewritten query, not the raw follow-up text, though the generation call
+    still receives (and judges rule 2 against) the user's original wording
+    via {question}.
 
     Returns one of several fixed responses (with empty sources) instead of a
     grounded content answer when one isn't appropriate. Two of these are
@@ -237,6 +274,9 @@ def answer_question(
     fallback_dangerous = config_store.get("generation", "fallback_dangerous", FALLBACK_DANGEROUS)
     generation_model = config_store.get("generation", "model", GENERATION_MODEL)
     generation_temperature = config_store.get("generation", "temperature", GENERATION_TEMPERATURE)
+    condense_question_prompt = config_store.get(
+        "generation", "condense_question_prompt", CONDENSE_QUESTION_SYSTEM_PROMPT
+    )
 
     question = (question or "").strip()
     if not question:
@@ -251,8 +291,13 @@ def answer_question(
     if store_is_empty():
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
 
+    history_messages = _build_history_messages(chat_history)
+    search_query = _condense_question(
+        question, history_messages, generation_model, condense_question_prompt
+    )
+
     retriever = get_retriever()
-    docs = retriever.invoke(question)
+    docs = retriever.invoke(search_query)
 
     if not docs:
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
@@ -280,7 +325,7 @@ def answer_question(
     # silently break the fallback-detection check.
     response = chain.invoke(
         {
-            "chat_history": _build_history_messages(chat_history),
+            "chat_history": history_messages,
             "context": context,
             "question": question,
             "previous_title": previous_title or _NO_PREVIOUS_TITLE,

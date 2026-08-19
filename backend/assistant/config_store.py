@@ -85,6 +85,7 @@ def seed_defaults() -> None:
     """
     from .retrieval.config import K, SEARCH_TYPE
     from .retrieval.prompt import (
+        CONDENSE_QUESTION_SYSTEM_PROMPT,
         FALLBACK_ABUSE,
         FALLBACK_DANGEROUS,
         FALLBACK_GIBBERISH,
@@ -186,6 +187,17 @@ def seed_defaults() -> None:
                     "turns) are given to the model as prior context on every /ask call -- lets "
                     "it resolve follow-up questions ('what about part-time employees?') against "
                     "what was already discussed. 0 disables chat history entirely."
+                ),
+            },
+            {
+                "category": "generation",
+                "key": "condense_question_prompt",
+                "value": CONDENSE_QUESTION_SYSTEM_PROMPT,
+                "description": (
+                    "System prompt used to rewrite a follow-up question into a standalone "
+                    "retrieval query before the vector search runs (see retrieval/qa.py's "
+                    "_condense_question) -- only affects what's searched for, not the wording "
+                    "the generation model sees or answers against."
                 ),
             },
             {

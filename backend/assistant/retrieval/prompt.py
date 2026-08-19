@@ -54,6 +54,18 @@ parental, sick, vacation, and more): answer with every distinct policy of
 that kind found in the context, not just whichever one retrieval ranked
 first.
 
+Rule 7 also covers comparison questions against a retrieved limit -- "can I
+take 12 this month" against a context chunk that caps remote work at "10
+consecutive business days per year" is answerable (12 exceeds a 10-day
+annual cap) even though neither "12" nor "this month" appears anywhere in
+the context. The model was defaulting to rule 2(f) here, treating "the exact
+number/timeframe I was asked about isn't stated" as "the context doesn't
+contain the answer" -- but the context does contain the answer, it just
+takes one comparison step to reach it. Rule 2(f) is still correct when the
+entitlement or limit itself is genuinely missing from the context; it's not
+correct just because reaching the answer requires comparing the asked-for
+number against a stated one instead of finding it stated outright.
+
 The TITLE/ANSWER envelope wrapping all of this exists so the chat session
 gets a meaningful, evolving title (e.g. "PTO Rollover Policy", broadening to
 "WFH and Parental Leave" once the conversation covers both) without a
@@ -77,6 +89,21 @@ strip it. Prepending it in code instead means it's always present
 regardless of how SYSTEM_PROMPT gets customized. qa.py concatenates the two
 (preamble first) when building the actual system message.
 """
+
+# Rewrites a follow-up question into a standalone retrieval query -- see
+# qa._condense_question. Config-editable like everything else here (category
+# "generation", key "condense_question_prompt") so wording can be tuned
+# without a redeploy, same as SYSTEM_PROMPT and the fallback strings below.
+CONDENSE_QUESTION_SYSTEM_PROMPT = (
+    "Rewrite the latest user message as a standalone search query for a "
+    "document retrieval system, filling in anything it leaves implicit "
+    '(pronouns, "that", "this month", a topic named only in an earlier '
+    "message) using the conversation below. Preserve the user's intent "
+    "exactly -- do not answer the question, expand its scope, or add "
+    "assumptions it doesn't already make. If the latest message is already "
+    "a standalone, self-contained question, return it completely "
+    "unchanged. Output ONLY the rewritten query text, nothing else."
+)
 
 GENERATION_MODEL = "gpt-4o-mini"
 
@@ -308,6 +335,16 @@ DISTINCT policy of that kind that appears below and summarize each one \
 clearly, the same as if the user had asked about each by name. Only cover \
 the ones actually present in the context; don't claim there are no others \
 if you simply weren't given them.
+
+A question that asks whether a specific number, date, or plan fits within a \
+limit is answerable by comparing it against a limit stated in the context, \
+even if that exact number/date never appears there itself -- e.g. "can I \
+take 12 this month" against a context chunk capping remote work at "10 \
+consecutive business days per year" is answerable (12 exceeds that 10-day \
+annual cap); state the comparison explicitly rather than just repeating the \
+limit. Only use rule 2(f) here if the entitlement or limit itself is \
+missing from the context -- not merely because the asked-for number, date, \
+or timeframe isn't stated verbatim.
 
 8. Disambiguate related quantities. When a question involves more than one \
 related number (e.g. total leave eligibility vs. how much of it is paid; a \
