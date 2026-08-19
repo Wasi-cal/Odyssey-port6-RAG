@@ -134,6 +134,12 @@ html, body, .stApp,
     letter-spacing: -0.01em; color: #171B2E;
 }
 
+.account-row {
+    font-size: 12.5px; font-weight: 500; color: #6B7280;
+    padding: 4px 2px 12px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 [data-testid="stSidebar"] button[data-testid="stBaseButton-tertiary"] {
     justify-content: flex-start; color: #3C4258; font-size: 13px;
     padding: 6px 8px; border-radius: 8px;
@@ -207,6 +213,13 @@ html, body, .stApp,
     background: #FBEAEA;
 }
 .empty-row { font-size: 12px; color: #B4B8C4; padding: 4px 8px; line-height: 1.6; }
+
+.audit-row {
+    font-size: 11.5px; color: #6B7280; padding: 5px 8px; line-height: 1.5;
+    border-bottom: 1px solid #F0F1F5;
+}
+.audit-row:last-child { border-bottom: none; }
+.audit-row b { color: #3C4258; font-weight: 500; }
 
 /* ---- Empty-state hero ---- */
 @keyframes fadeUp {

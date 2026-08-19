@@ -89,15 +89,21 @@ services:
   # --- App ----------------------------------------------------------------
   api:
     build: ./backend
-    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    # --proxy-headers: trust the X-Forwarded-For Caddy sets on every
+    # request it proxies, so request.client.host (used by
+    # assistant/rate_limit.py's per-IP login lockout) reflects the real
+    # browser's IP, not Caddy's own docker-network address. Safe to trust
+    # unconditionally here -- api's only inbound path is through Caddy on
+    # this same private compose network, not the public internet.
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"
     env_file:
       - ./backend/.env
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
       - DATABASE_URL=postgresql://docassist:docassist@app-db:5432/docassist
       - REDIS_URL=redis://redis:6379/0
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ./backend/data:/app/data
       - ./backend/chroma_db:/app/chroma_db
@@ -128,16 +134,41 @@ services:
     environment:
       - API_BASE_URL=http://api:8000
       # Browser-facing: the Library's "view PDF" links are rendered as plain
-      # <a href> tags the user's own browser navigates to, so they need the
-      # host-published port, not the Docker-internal service name above.
-      - PUBLIC_API_BASE_URL=http://localhost:8000
-    ports:
-      - "8501:8501"
+      # <a href> tags the user's own browser navigates to, and the JWT
+      # cookie's fallback auth path (api.get_current_user) needs to match
+      # -- both now go through Caddy's HTTPS listener, not straight to the
+      # Docker-internal service the line above reaches.
+      - PUBLIC_API_BASE_URL=https://localhost:8000
+    expose:
+      - "8501"
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
 
+  # --- TLS termination -----------------------------------------------------
+  # Fronts both ui and api on the SAME ports they used to publish directly
+  # (8501, 8000) -- now over HTTPS instead of plain HTTP. Neither service
+  # publishes its port itself anymore (see `expose` above); this is the only
+  # way in from the host.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8501:8501"
+      - "8000:8000"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      ui:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   temporal-db-data:
   app-db-data:
+  caddy-data:
+  caddy-config:

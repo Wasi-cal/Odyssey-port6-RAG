@@ -23,57 +23,78 @@ class Composer:
         store.pending_question = None
 
         if attached:
-            # Skip the immediate rerun when a question was submitted
-            # alongside the attachment -- it still needs to reach the
-            # caller to be asked this run; _ask_and_append reruns once it's
-            # done, which redraws the sidebar with the refreshed library too.
-            self.ingest(attached, store, rerun_when_idle=not question)
+            self._stage_upload(attached, store)
+
+        self._render_pending_upload(store)
 
         return question
 
-    def ingest(self, files, store: SessionStore, rerun_when_idle: bool = True) -> None:
-        """Upload PDFs to the backend and refresh the library from it.
-
-        A name that's already in the library (this user's own, or -- since
-        the document set is shared -- anyone else's) is never re-ingested or
-        overwritten: it's skipped with a warning telling the user to delete
-        the existing one first. Reruns on a clean success (unless
-        rerun_when_idle=False) so the sidebar -- rendered earlier in this
-        same script run, before the composer -- doesn't keep showing the
-        stale library until some later, unrelated interaction; a warning
-        skips that rerun so the message actually stays on screen to be read.
+    def _stage_upload(self, files, store: SessionStore) -> None:
+        """Uploading requires the admin password on every single call (not a
+        one-time "unlock") -- see api.require_admin_password. Files are
+        staged in session_state as plain {"name", "bytes"} dicts (not the
+        UploadedFile objects themselves) so they survive the reruns between
+        attaching them and confirming the password below.
         """
         already_mine = sorted({f.name for f in files if store.is_ingested(f.name)})
-        new_files = [f for f in files if not store.is_ingested(f.name)]
-
-        warnings = []
         if already_mine:
-            warnings.append(
+            st.warning(
                 "Already in your library, skipped: "
                 + ", ".join(already_mine)
                 + ". Delete it from the Library first if you want to replace it."
             )
 
+        new_files = [f for f in files if not store.is_ingested(f.name)]
         if new_files:
-            with st.spinner(f"Ingesting {len(new_files)} document(s)…"):
-                result = self.api.ingest(new_files, store.user_id)
-            if result["ok"]:
-                store.refresh_library()
-                skipped = result.get("skipped") or []
-                if skipped:
-                    warnings.append(
-                        "Already exists, skipped: "
-                        + ", ".join(skipped)
-                        + ". Delete the existing file first, then re-upload."
-                    )
-            else:
-                st.error(result["error"])
-                return
+            st.session_state.pending_upload = [
+                {"name": f.name, "bytes": f.getvalue()} for f in new_files
+            ]
 
-        for message in warnings:
-            st.warning(message)
-        if not warnings and new_files and rerun_when_idle:
+    def _render_pending_upload(self, store: SessionStore) -> None:
+        pending = st.session_state.get("pending_upload")
+        if not pending:
+            return
+
+        names = ", ".join(p["name"] for p in pending)
+        st.info(f"Ready to upload: {names}")
+        admin_password = st.text_input(
+            "Admin password", type="password", key="admin-pw-upload"
+        )
+        col_confirm, col_cancel = st.columns(2)
+        with col_confirm:
+            confirm = st.button(
+                "Confirm upload", key="confirm-upload", type="primary", use_container_width=True
+            )
+        with col_cancel:
+            cancel = st.button("Cancel", key="cancel-upload", use_container_width=True)
+
+        if cancel:
+            st.session_state.pending_upload = None
             st.rerun()
+            return
+        if not confirm:
+            return
+        if not admin_password:
+            st.error("Admin password required.")
+            return
+
+        with st.spinner(f"Ingesting {len(pending)} document(s)…"):
+            result = self.api.ingest(pending, admin_password)
+
+        if not result["ok"]:
+            st.error(result["error"])
+            return
+
+        store.refresh_library()
+        st.session_state.pending_upload = None
+        skipped = result.get("skipped") or []
+        if skipped:
+            st.warning(
+                "Already exists, skipped: "
+                + ", ".join(skipped)
+                + ". Delete the existing file first, then re-upload."
+            )
+        st.rerun()
 
     def _render_input(self, session_id: str, store: SessionStore) -> tuple[str, list]:
         """Returns (text, files). Uses the built-in attachment button when
@@ -96,7 +117,7 @@ class Composer:
                     key=f"uploader-{session_id}",
                 )
             if legacy:
-                self.ingest(legacy, store)
+                self._stage_upload(legacy, store)
             text = st.chat_input(
                 "Ask about your documents…", key=f"chat-input-{session_id}"
             )

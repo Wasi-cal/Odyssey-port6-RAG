@@ -57,7 +57,7 @@ class SessionStore:
         transient failure getting cached as "you have no past chats" for
         the rest of the browser session.
         """
-        rows = self.api.get_sessions(self.user_id)
+        rows = self.api.get_sessions()
         if rows is None:
             return
         for row in rows:
@@ -89,7 +89,7 @@ class SessionStore:
             )
 
     def new_session(self) -> str:
-        created = self.api.create_session(self.user_id)
+        created = self.api.create_session()
         # Falls back to a local-only id if the backend is briefly unreachable
         # -- chat still works this run, it just won't survive a refresh.
         sid = created["id"] if created else f"local-{len(st.session_state.session_order) + 1}"
@@ -149,12 +149,12 @@ class SessionStore:
         if fetched is not None:
             st.session_state.library = fetched
 
-    def delete_document(self, filename: str) -> str | None:
+    def delete_document(self, filename: str, admin_password: str) -> str | None:
         """Deletes a document (everywhere -- see api.delete_document_endpoint)
         and refreshes the library. Returns an error message on failure, None
         on success.
         """
-        result = self.api.delete_document(filename)
+        result = self.api.delete_document(filename, admin_password)
         if not result["ok"]:
             return result["error"]
         self.refresh_library()

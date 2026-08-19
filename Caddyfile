@@ -1,0 +1,24 @@
+# TLS termination for the browser-facing hops -- JWTs and passwords no
+# longer travel in plaintext between the browser and this stack. Internal
+# container-to-container traffic (ui -> api over the compose network)
+# stays plain HTTP; that's a trusted private network, not "the wire" in the
+# sense that matters here, and encrypting it too would be extra complexity
+# for no real gain in this setup.
+#
+# `tls internal` mints a certificate from Caddy's own local CA -- there's
+# no public "localhost" domain to get a real (Let's Encrypt) certificate
+# for, so the browser will show a self-signed-certificate warning the first
+# time. That's expected for local dev, not a misconfiguration; to make the
+# browser trust it silently, export Caddy's root CA and add it to your
+# system/browser trust store (`docker compose exec caddy cat
+# /data/caddy/pki/authorities/local/root.crt`).
+
+localhost:8501 {
+	tls internal
+	reverse_proxy ui:8501
+}
+
+localhost:8000 {
+	tls internal
+	reverse_proxy api:8000
+}

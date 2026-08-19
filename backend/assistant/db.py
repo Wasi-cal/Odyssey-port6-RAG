@@ -1,11 +1,13 @@
-"""Postgres persistence for the document library and chat history.
+"""Postgres persistence for user accounts, the document library, and chat
+history.
 
-Chat sessions/messages are per-user -- for now a per-browser anonymous ID
-minted by the frontend (see frontend/doc_assist/domain/identity.py), swapped
-for a real authenticated user id once auth exists with no schema changes
-needed. Documents are global instead: there's one shared Chroma collection
-for every user's questions to draw from, so the library listing matches that
--- uploaded_by is attribution only, never a filter.
+Chat sessions/messages are per-user -- users.id doubles as the login
+username (see assistant/auth.py for password hashing/JWT issuance), so
+chat_sessions.user_id is exactly whatever api.get_current_user() decoded
+from the caller's JWT, never a client-supplied value. Documents are global
+instead: there's one shared Chroma collection for every user's questions to
+draw from, so the library listing matches that -- uploaded_by is
+attribution only, never a filter.
 
 Also owns config_settings -- live app configuration (system prompts,
 retrieval tuning, etc.), source-of-truth here and read through a Redis cache
@@ -43,8 +45,13 @@ _pool = ConnectionPool(
 )
 
 _SCHEMA_SQL = """
+-- id doubles as the login username once an account is registered --
+-- password_hash is NULL for any row that predates real auth (there are
+-- none left once this migrates cleanly, but nothing else about this table
+-- assumes it's non-null).
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
+    password_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -92,6 +99,20 @@ CREATE TABLE IF NOT EXISTS config_settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (category, key)
 );
+
+-- Who did what to the shared document library, and when -- the admin
+-- password alone doesn't say WHO used it, since it's a shared secret, not a
+-- per-user credential. Every /ingest and DELETE /documents call is
+-- authenticated as some logged-in user before it ever checks the admin
+-- password, so that username is what gets recorded here.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    action TEXT NOT NULL CHECK (action IN ('upload', 'delete')),
+    filename TEXT NOT NULL,
+    performed_by TEXT NOT NULL REFERENCES users(id),
+    performed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_time ON admin_audit_log(performed_at DESC);
 """
 
 
@@ -133,6 +154,13 @@ BEGIN
 END $$;
 """
 
+# One-time migration for a users table created before real accounts existed
+# -- CREATE TABLE IF NOT EXISTS above never adds a column to an existing
+# table, so an existing volume needs this explicitly.
+_MIGRATE_USERS_SQL = """
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+"""
+
 
 def init_db() -> None:
     """Open the pool and create tables if they don't exist yet.
@@ -144,6 +172,7 @@ def init_db() -> None:
     _pool.open(wait=True)
     with _pool.connection() as conn:
         conn.execute(_SCHEMA_SQL)
+        conn.execute(_MIGRATE_USERS_SQL)
         conn.execute(_MIGRATE_DOCUMENTS_SQL)
 
 
@@ -155,12 +184,41 @@ def close_db() -> None:
     _pool.close()
 
 
-def ensure_user(user_id: str) -> None:
+def create_account(username: str, password_hash: str) -> bool:
+    """Returns True if the account was created, False if the username was
+    already taken. ON CONFLICT DO NOTHING (not UPSERT) -- two concurrent
+    registrations racing for the same username must never let the second
+    one silently overwrite the first's password hash.
+    """
     with _pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO users (id) VALUES (%s) ON CONFLICT (id) DO NOTHING",
-            (user_id,),
-        )
+        row = conn.execute(
+            "INSERT INTO users (id, password_hash) VALUES (%s, %s) "
+            "ON CONFLICT (id) DO NOTHING RETURNING id",
+            (username, password_hash),
+        ).fetchone()
+    return row is not None
+
+
+def get_password_hash(username: str) -> str | None:
+    with _pool.connection() as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE id = %s", (username,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_password_hash(username: str, password_hash: str) -> bool:
+    """Returns True if the account existed and was updated, False if there
+    was no such username -- used by both the self-service change-password
+    flow (caller already re-verified the old password) and the
+    admin-password-gated reset flow (no old password needed at all).
+    """
+    with _pool.connection() as conn:
+        row = conn.execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s RETURNING id",
+            (password_hash, username),
+        ).fetchone()
+    return row is not None
 
 
 def list_documents() -> list[dict]:
@@ -254,6 +312,19 @@ def add_message(session_id: str, role: str, content: str, meta: dict | None) -> 
         )
 
 
+def get_session_owner(session_id: str) -> str | None:
+    """The username chat_sessions.user_id this session belongs to (or None
+    if it doesn't exist) -- api.py checks this against the authenticated
+    caller before returning a session's messages, so one user can't read
+    another's chat by guessing/enumerating session ids.
+    """
+    with _pool.connection() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM chat_sessions WHERE id = %s", (session_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
 def get_session_title(session_id: str) -> str | None:
     """The session's current title (or None) -- api.py hands this to the
     LLM as context on every /ask call so it can keep, refine, or broaden the
@@ -297,3 +368,24 @@ def seed_config_defaults(defaults: list[dict]) -> None:
                 "VALUES (%s, %s, %s, %s) ON CONFLICT (category, key) DO NOTHING",
                 (d["category"], d["key"], Jsonb(d["value"]), d.get("description")),
             )
+
+
+def log_admin_action(action: str, filename: str, performed_by: str) -> None:
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO admin_audit_log (action, filename, performed_by) VALUES (%s, %s, %s)",
+            (action, filename, performed_by),
+        )
+
+
+def list_admin_audit_log(limit: int = 50) -> list[dict]:
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT action, filename, performed_by, performed_at FROM admin_audit_log "
+            "ORDER BY performed_at DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+    return [
+        {"action": r[0], "filename": r[1], "performed_by": r[2], "performed_at": r[3].isoformat()}
+        for r in rows
+    ]

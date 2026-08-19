@@ -5,9 +5,10 @@ wires them together. app.py just constructs and runs one of these.
 import streamlit as st
 
 from .api.client import ApiClient
-from .domain.identity import get_user_id
+from .domain import auth
 from .domain.models import ChatSession
 from .domain.session_store import SessionStore
+from .ui.components.auth_view import AuthView
 from .ui.components.chat import ConversationView
 from .ui.components.composer import Composer
 from .ui.components.hero import Hero
@@ -17,14 +18,37 @@ from .ui.components.sidebar import Sidebar
 class DocAssistApp:
     def __init__(self, api_base_url: str):
         self.api = ApiClient(api_base_url)
-        self.store = SessionStore(self.api, get_user_id())
-        self.sidebar = Sidebar()
+
+    def run(self) -> None:
+        session = auth.resolve_session(self.api)
+        if session is None:
+            # Not logged in (or the stored token turned out to be invalid) --
+            # the rest of the app never even constructs until this resolves,
+            # so nothing below ever runs against an unauthenticated client.
+            AuthView(self.api).render()
+            return
+
+        token, username = session
+        self.api.set_token(token)
+        # Whenever any request comes back 401 (the JWT expired mid-session),
+        # drop straight back to the login screen from wherever that call
+        # happened to be, instead of every call site checking for it itself.
+        self.api.on_unauthorized = self._handle_unauthorized
+
+        self.store = SessionStore(self.api, username)
+        self.sidebar = Sidebar(self.api)
         self.hero = Hero()
         self.conversation = ConversationView()
         self.composer = Composer(self.api)
 
-    def run(self) -> None:
-        self.sidebar.render(self.store)
+        self._render_main(username)
+
+    def _handle_unauthorized(self) -> None:
+        auth.clear_session()
+        st.rerun()
+
+    def _render_main(self, username: str) -> None:
+        self.sidebar.render(self.store, username, on_logout=self._handle_unauthorized)
 
         session = self.store.current_session
         if session.is_empty:
@@ -49,7 +73,7 @@ class DocAssistApp:
 
         with st.container(key=f"msgrow-assistant-{session.id}-{idx + 1}"):
             with st.spinner("Thinking…"):
-                answer_text, meta = self.api.ask(question, session.id, self.store.user_id)
+                answer_text, meta = self.api.ask(question, session.id)
             with st.container(key=f"bubble-assistant-{session.id}-{idx + 1}"):
                 st.markdown(answer_text)
             if meta:
