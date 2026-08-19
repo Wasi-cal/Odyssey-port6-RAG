@@ -86,6 +86,7 @@ def seed_defaults() -> None:
     from .retrieval.config import K, SEARCH_TYPE
     from .retrieval.prompt import (
         FALLBACK_ABUSE,
+        FALLBACK_DANGEROUS,
         FALLBACK_GIBBERISH,
         FALLBACK_GREETING,
         FALLBACK_HANDOFF,
@@ -151,6 +152,17 @@ def seed_defaults() -> None:
                 "description": (
                     "Returned when the question is in scope but not covered by the "
                     "documents -- includes the HR escalation email, edit it here to change that address."
+                ),
+            },
+            {
+                "category": "generation",
+                "key": "fallback_dangerous",
+                "value": FALLBACK_DANGEROUS,
+                "description": (
+                    "Returned when the model itself judges the request could help cause "
+                    "real-world harm (rule 2(g) in the system prompt) -- checked before every "
+                    "other rule, including 'it's in the context.' Distinct from fallback_abuse, "
+                    "which is the pre-LLM Moderation API's judgment on the input text itself."
                 ),
             },
             {

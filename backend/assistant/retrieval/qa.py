@@ -17,6 +17,7 @@ from ..paths import DATA_DIR
 from .citations import dedupe_sources, extract_cited_docs, format_context
 from .prompt import (
     FALLBACK_ABUSE,
+    FALLBACK_DANGEROUS,
     FALLBACK_GIBBERISH,
     FALLBACK_GREETING,
     FALLBACK_HANDOFF,
@@ -25,6 +26,7 @@ from .prompt import (
     FALLBACK_UNRELATED,
     GENERATION_MODEL,
     GENERATION_TEMPERATURE,
+    INJECTION_DEFENSE_PREAMBLE,
     SYSTEM_PROMPT,
 )
 from .store import get_retriever, store_is_empty
@@ -232,6 +234,7 @@ def answer_question(
         "generation", "fallback_unanswered", FALLBACK_UNANSWERED
     )
     fallback_abuse = config_store.get("generation", "fallback_abuse", FALLBACK_ABUSE)
+    fallback_dangerous = config_store.get("generation", "fallback_dangerous", FALLBACK_DANGEROUS)
     generation_model = config_store.get("generation", "model", GENERATION_MODEL)
     generation_temperature = config_store.get("generation", "temperature", GENERATION_TEMPERATURE)
 
@@ -257,9 +260,13 @@ def answer_question(
     context = format_context(docs)
 
     llm = ChatOpenAI(model=generation_model, temperature=generation_temperature)
+    # INJECTION_DEFENSE_PREAMBLE always goes first, ahead of the
+    # config-editable system_prompt -- see prompt.py's docstring for why
+    # it's a separate, non-editable constant rather than folded into
+    # SYSTEM_PROMPT itself.
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", system_prompt),
+            ("system", INJECTION_DEFENSE_PREAMBLE + system_prompt),
             MessagesPlaceholder("chat_history"),
             ("human", "{question}"),
         ]
@@ -283,6 +290,7 @@ def answer_question(
             "fallback_gibberish": fallback_gibberish,
             "fallback_unrelated": fallback_unrelated,
             "fallback_unanswered": fallback_unanswered,
+            "fallback_dangerous": fallback_dangerous,
         }
     )
     title, answer_text = _split_title_and_answer(response.content)
@@ -307,6 +315,7 @@ def answer_question(
         fallback_unclear,
         fallback_unrelated,
         fallback_unanswered,
+        fallback_dangerous,
     ):
         return RagResult(
             answer=answer_text,
