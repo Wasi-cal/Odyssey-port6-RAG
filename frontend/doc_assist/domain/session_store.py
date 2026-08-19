@@ -142,11 +142,6 @@ class SessionStore:
     def library(self) -> list[dict]:
         return st.session_state.get("library") or []
 
-    def is_ingested(self, filename: str) -> bool:
-        return any(entry["name"] == filename for entry in self.library) or any(
-            p["filename"] == filename for p in self.pending_uploads
-        )
-
     def refresh_library(self) -> None:
         """A None result (request failed) leaves the existing library alone
         -- a transient failure should never wipe out a library that was

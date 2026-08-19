@@ -34,19 +34,14 @@ class Composer:
         waiting for approval, and picks up the switch to the real library
         automatically once an admin approves it (session_store refreshes
         both every rerun).
+
+        No client-side "already have this" pre-check -- what counts as a
+        duplicate is decided by content hash, not filename (see api.py's
+        /ingest), and the client can't know that without hashing the bytes
+        itself. Every attached file is sent; the server decides.
         """
-        already_mine = sorted({f.name for f in files if store.is_ingested(f.name)})
-        if already_mine:
-            st.warning(
-                "Already in your library or pending approval, skipped: " + ", ".join(already_mine)
-            )
-
-        new_files = [f for f in files if not store.is_ingested(f.name)]
-        if not new_files:
-            return
-
-        with st.spinner(f"Uploading {len(new_files)} document(s)…"):
-            result = self.api.ingest([{"name": f.name, "bytes": f.getvalue()} for f in new_files])
+        with st.spinner(f"Uploading {len(files)} document(s)…"):
+            result = self.api.ingest([{"name": f.name, "bytes": f.getvalue()} for f in files])
 
         if not result["ok"]:
             st.error(result["error"])
@@ -56,10 +51,13 @@ class Composer:
         # No st.rerun() here -- these messages need to actually stay on
         # screen to be read; the sidebar's pending list catches up on the
         # next interaction (it re-fetches every rerun, see session_store.py).
+        if result["renamed"]:
+            renames = ", ".join(f"{old} → {new}" for old, new in result["renamed"].items())
+            st.info(f"Renamed to avoid a name clash with an existing document: {renames}")
         if result["queued"]:
             st.info("Waiting for admin approval: " + ", ".join(result["queued"]))
         if result["skipped"]:
-            st.warning("Already exists, skipped: " + ", ".join(result["skipped"]))
+            st.warning("Identical content already uploaded, skipped: " + ", ".join(result["skipped"]))
 
     def _render_input(self, session_id: str, store: SessionStore) -> tuple[str, list]:
         """Returns (text, files). Uses the built-in attachment button when

@@ -233,8 +233,9 @@ class AskResponse(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    queued: list[str]  # accepted, now awaiting admin approval
-    skipped: list[str] = []  # names already in the library or already pending
+    queued: list[str]  # accepted (post-rename, if any), now awaiting admin approval
+    skipped: list[str] = []  # duplicate CONTENT of something already in the library or pending
+    renamed: dict[str, str] = {}  # original filename -> the disambiguated name it was stored as
 
 
 class DocumentInfo(BaseModel):
@@ -624,6 +625,28 @@ def ask(payload: AskRequest, user_id: str = Depends(get_current_user)) -> AskRes
     )
 
 
+def _dedupe_filename(name: str, reserved_names: set[str]) -> str:
+    """If `name` is already taken (by different content -- callers only
+    reach this after content_hash has already ruled out a true duplicate),
+    returns a disambiguated variant instead: "handbook.pdf" -> "handbook
+    (2).pdf" -> "handbook (3).pdf", etc. Filename collisions are avoided by
+    construction rather than by rejecting the upload -- two different files
+    are always allowed to coexist, they just can't share the exact string
+    that's Chroma's chunk "source" metadata and the documents table's
+    primary key.
+    """
+    if name not in reserved_names:
+        return name
+    stem, dot, ext = name.rpartition(".")
+    stem, ext = (stem, f".{ext}") if dot else (name, "")
+    n = 2
+    while True:
+        candidate = f"{stem} ({n}){ext}"
+        if candidate not in reserved_names:
+            return candidate
+        n += 1
+
+
 @app.post("/ingest", response_model=UploadResponse)
 async def ingest_endpoint(
     files: list[UploadFile] = File(...), user_id: str = Depends(get_current_user)
@@ -636,17 +659,17 @@ async def ingest_endpoint(
         raise HTTPException(status_code=400, detail="No files uploaded.")
 
     PENDING_DIR.mkdir(parents=True, exist_ok=True)
-    # Actual duplicate-upload check is by content hash, not filename --
-    # filename comparison is unreliable (the same file re-uploaded under a
-    # different name would slip through). Filenames are still checked
-    # separately below: they're the storage/display identity (Chroma's
-    # chunk "source" metadata, the documents table's primary key,
-    # GET /documents/{filename}), so two DIFFERENT files can't share one.
+    # The only reason to ever skip an upload is duplicate CONTENT (same
+    # sha256, see _dedupe_filename's docstring for why filename alone isn't
+    # a reliable duplicate check). A filename that's merely already taken
+    # by different content is never a reason to skip -- see
+    # _dedupe_filename, which renames around it instead.
     reserved_hashes = db.list_all_content_hashes() | db.list_pending_content_hashes()
     reserved_names = db.list_all_filenames() | db.list_pending_filenames()
 
     queued = []
     skipped = []
+    renamed = {}
     for uploaded in files:
         name = uploaded.filename or ""
         if not name.lower().endswith(".pdf"):
@@ -655,18 +678,22 @@ async def ingest_endpoint(
         content = await uploaded.read()
         content_hash = hashlib.sha256(content).hexdigest()
 
-        if content_hash in reserved_hashes or name in reserved_names:
+        if content_hash in reserved_hashes:
             skipped.append(name)
             continue
 
-        dest = PENDING_DIR / name
-        dest.write_bytes(content)
-        db.create_pending_document(str(uuid.uuid4()), name, str(dest), user_id, content_hash)
-        reserved_hashes.add(content_hash)
-        reserved_names.add(name)
-        queued.append(name)
+        stored_name = _dedupe_filename(name, reserved_names)
+        if stored_name != name:
+            renamed[name] = stored_name
 
-    return UploadResponse(queued=queued, skipped=skipped)
+        dest = PENDING_DIR / stored_name
+        dest.write_bytes(content)
+        db.create_pending_document(str(uuid.uuid4()), stored_name, str(dest), user_id, content_hash)
+        reserved_hashes.add(content_hash)
+        reserved_names.add(stored_name)
+        queued.append(stored_name)
+
+    return UploadResponse(queued=queued, skipped=skipped, renamed=renamed)
 
 
 @app.get("/documents/pending", response_model=list[PendingDocumentInfo])

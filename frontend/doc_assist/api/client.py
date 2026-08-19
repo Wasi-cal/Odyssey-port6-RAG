@@ -140,8 +140,12 @@ class ApiClient:
         `files` is a list of {"name": str, "bytes": bytes} -- plain dicts,
         not UploadedFile objects, so they survive being held in
         session_state across reruns (see composer.py). Returns either
-        {"ok": True, "queued": [...], "skipped": [...]} or
-        {"ok": False, "error": "..."}. Never raises.
+        {"ok": True, "queued": [...], "skipped": [...], "renamed": {...}} or
+        {"ok": False, "error": "..."}. Never raises. "renamed" maps an
+        original filename to what it was actually stored as, whenever it
+        collided with a DIFFERENT existing file's name -- collisions are
+        resolved by renaming, not by rejecting the upload (see api.py's
+        _dedupe_filename).
         """
         try:
             multipart = [("files", (f["name"], f["bytes"], "application/pdf")) for f in files]
@@ -155,7 +159,12 @@ class ApiClient:
                 return {"ok": False, "error": "Your session expired. Please log in again."}
             if resp.status_code == 200:
                 data = resp.json()
-                return {"ok": True, "queued": data.get("queued", []), "skipped": data.get("skipped", [])}
+                return {
+                    "ok": True,
+                    "queued": data.get("queued", []),
+                    "skipped": data.get("skipped", []),
+                    "renamed": data.get("renamed", {}),
+                }
             return {"ok": False, "error": self._extract_error(resp)}
         except requests.exceptions.Timeout:
             return {"ok": False, "error": "Upload timed out. Try again with fewer files."}
