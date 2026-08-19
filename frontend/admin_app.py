@@ -51,10 +51,16 @@ def _post(path: str) -> bool:
 
 
 def _render_login() -> None:
-    st.title("Admin login")
-    with st.form("admin-login"):
-        password = st.text_input("Admin password", type="password")
-        submitted = st.form_submit_button("Log in", type="primary")
+    # Centered, narrow column instead of full-width -- a login box has no
+    # reason to stretch across the whole page. Plain text_input + button
+    # (not st.form) on purpose: inside a form, Enter in the password field
+    # submits it; outside one, Enter just commits the value like any other
+    # widget, so the user must click Log in.
+    _, col, _ = st.columns([1, 1, 1])
+    with col:
+        st.title("Admin login")
+        password = st.text_input("Admin password", type="password", key="admin-login-password")
+        submitted = st.button("Log in", type="primary", use_container_width=True)
     if not submitted:
         return
     try:
