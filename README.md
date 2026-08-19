@@ -31,23 +31,7 @@ Doc Assist turns your HR policies, SOPs, and onboarding materials into a chatbot
 | ⚙️ **Configurable without a redeploy** | Prompts, pricing, session/lockout windows all live in the database, editable on the fly |
 | 🔁 **Durable ingestion** | Large uploads and transient API hiccups are retried automatically, per-file, without redoing a whole batch |
 
-### See it in action
 
-> 📸 *Screenshot: the chat interface — a question, a grounded answer, and its citations*
-> `docs/screenshots/chat.png` — add here
->
-> 📸 *Screenshot: a document sitting in "waiting for admin approval"*
-> `docs/screenshots/pending-approval.png` — add here
->
-> 📸 *Screenshot: the admin monitoring dashboard*
-> `docs/screenshots/admin-dashboard.png` — add here
->
-> 📸 *Screenshot: the admin login screen*
-> `docs/screenshots/admin-login.png` — add here
-
-*(Screenshots pending — drop image files at the paths above and swap these callouts for `![...](path)` once captured.)*
-
----
 
 ## How it's built
 
