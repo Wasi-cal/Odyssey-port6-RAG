@@ -2,10 +2,7 @@
 
 Separate process/entrypoint from app.py (the chatbot) on purpose -- run with
 `streamlit run admin_app.py --server.port 8502`. Auth is completely
-independent: POST /admin/login (ADMIN_PASSWORD, env-configured on the
-backend) issues its own admin JWT, never a regular user token, and nothing
-here ever touches the chatbot's login. Kept as one plain-procedural file,
-not a package, since it's a small, single-page tool.
+independent from the chatbot's regular user login.
 """
 
 import requests
@@ -13,119 +10,564 @@ import streamlit as st
 
 from doc_assist.config import API_BASE_URL
 
-st.set_page_config(page_title="Doc Assist -- Admin", layout="wide")
+
+st.set_page_config(
+    page_title="Doc Assist — Admin",
+    page_icon="◈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+    :root {
+        --ink: #171B2E;
+        --text: #3C4258;
+        --muted: #9297A6;
+        --line: #E9EAF0;
+        --surface: #FFFFFF;
+        --soft: #F6F7FA;
+    }
+
+    .stApp {
+        font-family: 'IBM Plex Sans', sans-serif;
+        background: #FBFBFC;
+    }
+
+    .block-container {
+        max-width: 1120px;
+        padding: 40px 32px 60px;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        min-height: 38px;
+        border-radius: 9px;
+        border-color: var(--line);
+        font-size: 12.5px;
+        font-weight: 600;
+        box-shadow: none;
+    }
+
+    .stButton > button:hover {
+        border-color: #D6D9E2;
+    }
+
+    button[kind="primary"] {
+        background: var(--ink) !important;
+        border-color: var(--ink) !important;
+    }
+
+    button[kind="primary"]:hover {
+        background: #252A40 !important;
+        border-color: #252A40 !important;
+    }
+
+    /* Inputs */
+    [data-testid="stTextInput"] label {
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 600;
+    }
+
+    [data-testid="stTextInput"] input {
+        border-radius: 9px;
+        border-color: var(--line);
+        font-size: 13px;
+    }
+
+    [data-testid="stTextInput"] input:focus {
+        border-color: #C9CDFD;
+        box-shadow: 0 0 0 2px #EEF0FF;
+    }
+
+    /* Login */
+    .login-card {
+        max-width: 410px;
+        margin: 11vh auto 0;
+        padding: 34px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        box-shadow: 0 16px 45px rgba(23, 27, 46, 0.07);
+    }
+
+    .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 28px;
+    }
+
+    .brand-icon {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: var(--ink);
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: 'Manrope', sans-serif;
+        font-weight: 800;
+    }
+
+    .brand-name {
+        color: var(--ink);
+        font-family: 'Manrope', sans-serif;
+        font-size: 15px;
+        font-weight: 800;
+    }
+
+    .kicker {
+        color: #A0A5B3;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .login-title,
+    .page-title {
+        color: var(--ink);
+        font-family: 'Manrope', sans-serif;
+        font-weight: 700;
+        letter-spacing: -0.035em;
+    }
+
+    .login-title {
+        font-size: 28px;
+        margin: 6px 0;
+    }
+
+    .login-subtitle,
+    .page-subtitle {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+    }
+
+    .login-subtitle {
+        margin: 0 0 24px;
+    }
+
+    /* Dashboard */
+    .page-title {
+        font-size: 30px;
+        margin-top: 5px;
+    }
+
+    .page-subtitle {
+        margin-top: 4px;
+    }
+
+    .section-heading {
+        color: var(--ink);
+        font-family: 'Manrope', sans-serif;
+        font-size: 17px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        margin: 30px 0 5px;
+    }
+
+    .section-caption {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 13px;
+    }
+
+    /* Metrics */
+    .metric-card {
+        min-height: 94px;
+        padding: 16px 17px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+    }
+
+    .metric-label {
+        color: var(--muted);
+        font-size: 10.5px;
+        font-weight: 600;
+        margin-bottom: 9px;
+    }
+
+    .metric-value {
+        color: var(--ink);
+        font-family: 'Manrope', sans-serif;
+        font-size: 21px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+    }
+
+    /* Pending documents */
+    .doc-row {
+        padding: 12px 14px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        margin-bottom: 8px;
+    }
+
+    .doc-name {
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .doc-meta {
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 4px;
+    }
+
+    .empty-state {
+        padding: 23px;
+        text-align: center;
+        border: 1px dashed #DDE0E8;
+        border-radius: 13px;
+        background: #FDFDFE;
+        color: var(--muted);
+        font-size: 12.5px;
+    }
+
+    /* Expanders + alerts */
+    [data-testid="stExpander"] {
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: #fff;
+        overflow: hidden;
+    }
+
+    [data-testid="stExpander"] summary {
+        color: var(--text);
+        font-size: 12.5px;
+        font-weight: 600;
+    }
+
+    [data-testid="stAlert"] {
+        border-radius: 10px;
+        font-size: 12px;
+    }
+
+    .admin-footer {
+        color: #B4B8C4;
+        font-size: 10.5px;
+        text-align: center;
+        margin-top: 38px;
+    }
+
+    @media (max-width: 760px) {
+        .block-container {
+            padding: 28px 18px 48px;
+        }
+
+        .login-card {
+            margin-top: 7vh;
+            padding: 26px;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# API helpers
+# ---------------------------------------------------------------------------
 
 
 def _headers() -> dict:
     return {"Authorization": f"Bearer {st.session_state.admin_token}"}
 
 
+def _error_detail(resp: requests.Response, fallback: str) -> str:
+    try:
+        return str(resp.json().get("detail", fallback))
+    except ValueError:
+        return resp.text or fallback
+
+
 def _get(path: str):
     try:
-        resp = requests.get(f"{API_BASE_URL}{path}", headers=_headers(), timeout=30)
+        resp = requests.get(
+            f"{API_BASE_URL}{path}",
+            headers=_headers(),
+            timeout=30,
+        )
     except requests.exceptions.RequestException:
         st.error(f"Could not reach the API at {API_BASE_URL}.")
         return None
+
     if resp.status_code == 401:
         st.session_state.admin_token = None
         st.rerun()
+
     if resp.status_code != 200:
-        st.error(resp.json().get("detail", resp.text))
+        st.error(_error_detail(resp, "Request failed."))
         return None
+
     return resp.json()
 
 
 def _post(path: str) -> bool:
     try:
-        resp = requests.post(f"{API_BASE_URL}{path}", headers=_headers(), timeout=60)
+        resp = requests.post(
+            f"{API_BASE_URL}{path}",
+            headers=_headers(),
+            timeout=60,
+        )
     except requests.exceptions.RequestException:
         st.error(f"Could not reach the API at {API_BASE_URL}.")
         return False
+
     if resp.status_code == 401:
         st.session_state.admin_token = None
         st.rerun()
+
     if resp.status_code != 200:
-        st.error(resp.json().get("detail", resp.text))
+        st.error(_error_detail(resp, "Request failed."))
         return False
+
     return True
 
 
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
+
+
 def _render_login() -> None:
-    # Centered, narrow column instead of full-width -- a login box has no
-    # reason to stretch across the whole page. Plain text_input + button
-    # (not st.form) on purpose: inside a form, Enter in the password field
-    # submits it; outside one, Enter just commits the value like any other
-    # widget, so the user must click Log in.
     _, col, _ = st.columns([1, 1, 1])
+
     with col:
-        st.title("Admin login")
-        password = st.text_input("Admin password", type="password", key="admin-login-password")
-        submitted = st.button("Log in", type="primary", use_container_width=True)
+        st.markdown(
+            """
+            <div class="login-card">
+                <div class="brand">
+                    <div class="brand-icon">◈</div>
+                    <div class="brand-name">Doc Assist</div>
+                </div>
+                <div class="kicker">Administration</div>
+                <div class="login-title">Welcome back.</div>
+                <p class="login-subtitle">
+                    Monitor document ingestion, approvals, usage, and
+                    administrative activity from one place.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        password = st.text_input(
+            "Admin password",
+            type="password",
+            key="admin-login-password",
+        )
+
+        submitted = st.button(
+            "Log in",
+            type="primary",
+            use_container_width=True,
+        )
+
     if not submitted:
         return
+
     try:
         resp = requests.post(
-            f"{API_BASE_URL}/admin/login", json={"admin_password": password}, timeout=30
+            f"{API_BASE_URL}/admin/login",
+            json={"admin_password": password},
+            timeout=30,
         )
     except requests.exceptions.RequestException:
         st.error(f"Could not reach the API at {API_BASE_URL}.")
         return
+
     if resp.status_code != 200:
-        st.error(resp.json().get("detail", "Login failed."))
+        st.error(_error_detail(resp, "Login failed."))
         return
+
     st.session_state.admin_token = resp.json()["access_token"]
     st.rerun()
 
 
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+
+def _render_metric(label: str, value: str) -> None:
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_monitoring() -> None:
-    st.title("Admin monitoring")
-    col_refresh, col_logout = st.columns([1, 1])
-    with col_refresh:
-        if st.button("Refresh"):
+    st.markdown(
+        """
+        <div class="kicker">Administration</div>
+        <div class="page-title">System overview</div>
+        <div class="page-subtitle">
+            Monitor ingestion, usage, approvals, and admin activity.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    refresh_col, logout_col, _ = st.columns([1, 1, 8])
+
+    with refresh_col:
+        if st.button("↻  Refresh", use_container_width=True):
             st.rerun()
-    with col_logout:
-        if st.button("Log out"):
+
+    with logout_col:
+        if st.button("Log out", use_container_width=True):
             st.session_state.admin_token = None
             st.rerun()
 
     stats = _get("/admin/monitoring")
-    if stats:
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Pending approvals", stats["pending_approvals"])
-        c2.metric("Embeddings present", stats["embeddings_present"])
-        c3.metric("Tokens consumed", f"{stats['tokens_consumed']:,}")
-        c4.metric("Cost (est.)", f"${stats['cost_usd']:.4f}")
-        c5.metric("Avg tokens / question", f"{stats['average_token_usage']:.0f}")
 
-    st.subheader("Pending approvals")
+    if stats:
+        st.markdown(
+            '<div class="section-heading">Overview</div>',
+            unsafe_allow_html=True,
+        )
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        with c1:
+            _render_metric(
+                "Pending approvals",
+                f"{stats['pending_approvals']:,}",
+            )
+
+        with c2:
+            _render_metric(
+                "Embeddings present",
+                f"{stats['embeddings_present']:,}",
+            )
+
+        with c3:
+            _render_metric(
+                "Tokens consumed",
+                f"{stats['tokens_consumed']:,}",
+            )
+
+        with c4:
+            _render_metric(
+                "Estimated cost",
+                f"${stats['cost_usd']:.4f}",
+            )
+
+        with c5:
+            _render_metric(
+                "Avg. tokens / question",
+                f"{stats['average_token_usage']:.0f}",
+            )
+
+    st.markdown(
+        """
+        <div class="section-heading">Pending approvals</div>
+        <div class="section-caption">
+            Review documents before they become available to the assistant.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     pending = _get("/admin/pending-documents") or []
+
     if not pending:
-        st.caption("Nothing waiting for review.")
+        st.markdown(
+            '<div class="empty-state">Nothing waiting for review.</div>',
+            unsafe_allow_html=True,
+        )
+
     for doc in pending:
-        c_name, c_meta, c_approve, c_reject = st.columns([3, 2, 1, 1])
-        c_name.write(doc["filename"])
-        c_meta.caption(f"{doc['uploaded_by']} · {doc['uploaded_at'][:16].replace('T', ' ')}")
-        if c_approve.button("Approve", key=f"approve-{doc['id']}", type="primary"):
-            with st.spinner("Ingesting…"):
-                if _post(f"/admin/pending-documents/{doc['id']}/approve"):
+        c_info, c_approve, c_reject = st.columns([7, 1.2, 1.2])
+
+        with c_info:
+            uploaded_at = doc["uploaded_at"][:16].replace("T", " ")
+
+            st.markdown(
+                f"""
+                <div class="doc-row">
+                    <div class="doc-name">{doc["filename"]}</div>
+                    <div class="doc-meta">
+                        Uploaded by {doc["uploaded_by"]} · {uploaded_at}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with c_approve:
+            if st.button(
+                "Approve",
+                key=f"approve-{doc['id']}",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("Ingesting…"):
+                    if _post(
+                        f"/admin/pending-documents/{doc['id']}/approve"
+                    ):
+                        st.rerun()
+
+        with c_reject:
+            if st.button(
+                "Reject",
+                key=f"reject-{doc['id']}",
+                use_container_width=True,
+            ):
+                if _post(
+                    f"/admin/pending-documents/{doc['id']}/reject"
+                ):
                     st.rerun()
-        if c_reject.button("Reject", key=f"reject-{doc['id']}"):
-            if _post(f"/admin/pending-documents/{doc['id']}/reject"):
-                st.rerun()
 
     with st.expander("Admin activity"):
         entries = _get("/admin/audit-log") or []
+
         if not entries:
             st.caption("No admin activity yet.")
+
         for entry in entries:
             when = entry["performed_at"][:16].replace("T", " ")
-            st.caption(f"Uploaded **{entry['filename']}** · {entry['performed_by']} · {when}")
+            st.caption(
+                f"Uploaded **{entry['filename']}** · "
+                f"{entry['performed_by']} · {when}"
+            )
 
     with st.expander("Reset a user's password"):
+        st.caption(
+            "Use this only when an account needs an administrative password reset."
+        )
+
         with st.form("reset-password-form"):
             username = st.text_input("Username")
-            new_password = st.text_input("New password", type="password")
-            submitted = st.form_submit_button("Reset")
+            new_password = st.text_input(
+                "New password",
+                type="password",
+            )
+            submitted = st.form_submit_button(
+                "Reset password",
+                type="primary",
+            )
+
         if submitted:
             if len(new_password) < 8:
                 st.error("Password must be at least 8 characters.")
@@ -133,21 +575,33 @@ def _render_monitoring() -> None:
                 try:
                     resp = requests.post(
                         f"{API_BASE_URL}/admin/reset-password",
-                        json={"username": username, "new_password": new_password},
+                        json={
+                            "username": username,
+                            "new_password": new_password,
+                        },
                         headers=_headers(),
                         timeout=30,
                     )
+
                     if resp.status_code == 200:
                         st.success(f"Password reset for {username}.")
                     else:
-                        st.error(resp.json().get("detail", resp.text))
+                        st.error(
+                            _error_detail(resp, "Password reset failed.")
+                        )
+
                 except requests.exceptions.RequestException:
-                    st.error(f"Could not reach the API at {API_BASE_URL}.")
+                    st.error(
+                        f"Could not reach the API at {API_BASE_URL}."
+                    )
 
     with st.expander("Change admin password"):
+        st.caption("Changes the shared password used to log in to this admin app.")
+
         with st.form("change-admin-password-form"):
             new_admin_password = st.text_input("New admin password", type="password")
-            submitted = st.form_submit_button("Change")
+            submitted = st.form_submit_button("Change password", type="primary")
+
         if submitted:
             if len(new_admin_password) < 8:
                 st.error("Password must be at least 8 characters.")
@@ -159,12 +613,28 @@ def _render_monitoring() -> None:
                         headers=_headers(),
                         timeout=30,
                     )
+
                     if resp.status_code == 200:
                         st.success("Admin password changed. Use it next time you log in.")
                     else:
-                        st.error(resp.json().get("detail", resp.text))
+                        st.error(_error_detail(resp, "Password change failed."))
+
                 except requests.exceptions.RequestException:
                     st.error(f"Could not reach the API at {API_BASE_URL}.")
+
+    st.markdown(
+        f"""
+        <div class="admin-footer">
+            Doc Assist Admin · API {API_BASE_URL}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 
 
 if "admin_token" not in st.session_state:
