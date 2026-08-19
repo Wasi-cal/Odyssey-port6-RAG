@@ -171,6 +171,10 @@ class AdminResetPasswordRequest(BaseModel):
     new_password: str
 
 
+class AdminChangePasswordRequest(BaseModel):
+    new_admin_password: str
+
+
 class AuditLogEntry(BaseModel):
     action: str
     filename: str
@@ -388,6 +392,22 @@ def admin_login(payload: AdminLoginRequest, request: Request) -> AdminTokenRespo
         raise HTTPException(status_code=401, detail="Incorrect admin password.")
     rate_limit.clear_failures("admin_ip", client_ip)
     return AdminTokenResponse(access_token=auth.create_admin_token())
+
+
+@app.post("/admin/change-password")
+def admin_change_password(
+    payload: AdminChangePasswordRequest, _: None = Depends(get_current_admin)
+) -> dict:
+    """Changes the SHARED admin password (config_settings: auth/admin_password)
+    -- the in-app alternative to editing that row by hand in psql. Requires
+    already being logged in as admin; doesn't ask for the current password
+    since there's no per-admin account to re-verify against, just the one
+    shared secret this endpoint itself is gated by.
+    """
+    if len(payload.new_admin_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    config_store.set("auth", "admin_password", payload.new_admin_password)
+    return {"changed": True}
 
 
 @app.post("/admin/reset-password")

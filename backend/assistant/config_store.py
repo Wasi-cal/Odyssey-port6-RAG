@@ -62,6 +62,21 @@ def get(category: str, key: str, default=None):
         return default
 
 
+def set(category: str, key: str, value) -> None:
+    """Writes one setting straight to Postgres (upsert, unlike
+    seed_defaults' ON CONFLICT DO NOTHING) and invalidates the cache so the
+    change is visible immediately -- not just after the next
+    _CACHE_TTL_SECONDS refresh. Used by in-app editors (e.g. the admin app's
+    change-password form) as the alternative to editing config_settings by
+    hand in psql.
+    """
+    db.set_config_value(category, key, value)
+    try:
+        _redis.delete(_CACHE_KEY)
+    except redis.exceptions.RedisError:
+        pass  # Next get_all() falls back to Postgres directly either way.
+
+
 def seed_defaults() -> None:
     """Seeds config_settings with today's hardcoded values on first ever
     startup. ON CONFLICT DO NOTHING (see db.seed_config_defaults) means this

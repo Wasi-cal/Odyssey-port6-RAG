@@ -397,6 +397,20 @@ def seed_config_defaults(defaults: list[dict]) -> None:
             )
 
 
+def set_config_value(category: str, key: str, value) -> None:
+    """Upserts one (category, key) row -- unlike seed_config_defaults, this
+    DOES overwrite an existing value. Used by config_store.set() for in-app
+    editors (e.g. the admin app's change-password form) where actually
+    changing the live value is the whole point.
+    """
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO config_settings (category, key, value) VALUES (%s, %s, %s) "
+            "ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+            (category, key, Jsonb(value)),
+        )
+
+
 def log_admin_action(action: str, filename: str, performed_by: str) -> None:
     with _pool.connection() as conn:
         conn.execute(

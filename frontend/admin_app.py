@@ -144,6 +144,28 @@ def _render_monitoring() -> None:
                 except requests.exceptions.RequestException:
                     st.error(f"Could not reach the API at {API_BASE_URL}.")
 
+    with st.expander("Change admin password"):
+        with st.form("change-admin-password-form"):
+            new_admin_password = st.text_input("New admin password", type="password")
+            submitted = st.form_submit_button("Change")
+        if submitted:
+            if len(new_admin_password) < 8:
+                st.error("Password must be at least 8 characters.")
+            else:
+                try:
+                    resp = requests.post(
+                        f"{API_BASE_URL}/admin/change-password",
+                        json={"new_admin_password": new_admin_password},
+                        headers=_headers(),
+                        timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        st.success("Admin password changed. Use it next time you log in.")
+                    else:
+                        st.error(resp.json().get("detail", resp.text))
+                except requests.exceptions.RequestException:
+                    st.error(f"Could not reach the API at {API_BASE_URL}.")
+
 
 if "admin_token" not in st.session_state:
     st.session_state.admin_token = None
