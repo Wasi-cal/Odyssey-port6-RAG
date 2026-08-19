@@ -16,7 +16,6 @@ from ..openai_key import require_openai_api_key
 from ..paths import DATA_DIR
 from .citations import dedupe_sources, extract_cited_docs, format_context
 from .prompt import (
-    CONDENSE_QUESTION_SYSTEM_PROMPT,
     FALLBACK_ABUSE,
     FALLBACK_DANGEROUS,
     FALLBACK_GIBBERISH,
@@ -49,17 +48,35 @@ class RagResult:
     total_tokens: int | None = None
 
 
-# Matches system_prompt's "TITLE: ...\nANSWER: ..." envelope (see prompt.py)
-# -- DOTALL so ANSWER's captured group can span the answer's own newlines
-# (multi-paragraph answers, bulleted lists, a trailing "Citations:" line).
+# Matches system_prompt's "TITLE: ...\nANSWER: ...\nCitations: ..." envelope
+# (see prompt.py's output_contract) -- DOTALL so ANSWER's captured group can
+# span the answer's own newlines (multi-paragraph answers, bulleted lists).
+# Citations is now its OWN group (the prompt mandates a "Citations:" line on
+# every response, including fallbacks) so `answer` is just the ANSWER body,
+# not ANSWER-plus-a-trailing-Citations-line -- that split matters because
+# the fallback-string equality check below (`answer_text in (fallback_x,
+# ...)`) needs the bare fallback text, not that text with "\nCitations:"
+# stuck on the end. ANSWER's `(.*)` is greedy (not `.*?`): with DOTALL that
+# naturally backtracks to the LAST "\nCitations:" in the string, which is
+# what we want -- the actual final citations line, not any citation-like
+# substring earlier in a multi-paragraph answer.
+_TITLE_ANSWER_CITATIONS_RE = re.compile(
+    r"TITLE:\s*(.*?)\s*\nANSWER:\s*(.*)\nCitations:\s*(.*)", re.DOTALL
+)
+# Older two-group shape, tried only if the three-group match above fails --
+# keeps a malformed-but-still-parseable response (model forgot the
+# Citations line entirely) from degrading all the way to "no title, show
+# the raw text," same graceful-degradation intent as before.
 _TITLE_ANSWER_RE = re.compile(r"TITLE:\s*(.*?)\s*\n+ANSWER:\s*(.*)", re.DOTALL)
 
-# Status text handed to the model as "Previous title: ..." on a session's
-# first message (see the invoke() call below) -- system_prompt tells it this
-# is never a value to echo, but a plain greeting with nothing else to name
-# has occasionally come back verbatim anyway. _split_title_and_answer
-# catches that as a defensive backstop, not just a prompt instruction.
-_NO_PREVIOUS_TITLE = "(none yet -- this is the first message)"
+# Status text handed to the model as the <previous_title> input on a
+# session's first message (see the invoke() call below) -- title_rules in
+# prompt.py explicitly checks for the literal string "None" ("use 'New
+# Conversation' when <previous_title> is 'None' or empty"), so this must
+# match that exactly, not a descriptive sentence. _split_title_and_answer's
+# defensive check below catches the rare case where the model echoes it
+# back as the title anyway.
+_NO_PREVIOUS_TITLE = "None"
 
 # Fallback only -- live value is config_settings' generation/history_messages
 # (see config_store.seed_defaults). Counts messages (user + assistant), not
@@ -79,9 +96,17 @@ def _build_history_messages(chat_history: list[dict] | None) -> list:
     lets the model resolve a follow-up question ("what about part-time
     employees?") against what was actually discussed earlier in the same
     session, instead of treating every question as if it were the first.
-    Also fed to _condense_question so retrieval itself can resolve an
-    elliptical follow-up into a standalone search query, not just the
-    generation call.
+    Retrieval itself still only searches on the current question's text --
+    a history-aware query rewrite was tried and reverted (see git history):
+    diagnosis on the actual failure this was meant to fix (a "can I take 12
+    this month" follow-up not getting an answer) showed the right chunk was
+    already coming back on the raw question text alone, at k=10 -- the real
+    bug was rule 2(f) treating "no literal number/timeframe match" as
+    "context doesn't contain the answer" (see prompt.py's rule 7 addition on
+    comparison questions). The extra condense call added a full LLM
+    round-trip to every follow-up for a retrieval failure that wasn't
+    actually happening, and its added latency contributed to autorefresh
+    timing out in-flight /ask calls (see application.py's git history).
     """
     limit = config_store.get("generation", "history_messages", _HISTORY_MESSAGES_DEFAULT)
     trimmed = (chat_history or [])[-limit:] if limit > 0 else []
@@ -93,47 +118,28 @@ def _build_history_messages(chat_history: list[dict] | None) -> list:
     return messages
 
 
-# Rewrites a follow-up question into a standalone search query before
-# retrieval, using the conversation so far -- e.g. "can I take 12 this
-# month" alone may not retrieve the WFH policy chunk as reliably as
-# "can I take 12 work-from-home days this month" does once it's clear
-# from an earlier turn that "this" means work-from-home. This only
-# reformulates the RETRIEVAL query; the generation call downstream still
-# sees the user's original wording via {question}, and still judges rule
-# 2 against what was actually asked, not this rewritten version.
-def _condense_question(
-    question: str, history_messages: list, model: str, condense_prompt: str
-) -> str:
-    """Returns `question` unchanged when there's no history to resolve
-    against (a session's first message) -- no need to pay for an LLM call
-    when there's nothing it could add.
-    """
-    if not history_messages:
-        return question
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", condense_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{question}"),
-        ]
-    )
-    llm = ChatOpenAI(model=model, temperature=0.0)
-    chain = prompt | llm
-    response = chain.invoke({"chat_history": history_messages, "question": question})
-    condensed = (response.content or "").strip()
-    return condensed or question
-
-
 def _split_title_and_answer(raw_text: str) -> tuple[str | None, str]:
-    """Splits the model's "TITLE: ...\\nANSWER: ..." response into (title,
-    answer). Falls back to (None, raw_text) if the model ever doesn't follow
-    that format, so a formatting slip degrades to "no title this time"
-    rather than showing the user a garbled "TITLE: ..." response.
+    """Splits the model's "TITLE: ...\\nANSWER: ...\\nCitations: ..." envelope
+    into (title, answer) -- the Citations line itself is discarded here;
+    extract_cited_docs (called later in answer_question) finds citation
+    labels from the inline "[n]" markers in the answer body, which is a
+    superset of what the trailing Citations line lists anyway.
+
+    Tries the three-group TITLE/ANSWER/Citations shape first, falls back to
+    the older two-group TITLE/ANSWER shape (no Citations line) if that
+    doesn't match, and only falls back to (None, raw_text) if neither does
+    -- three levels of graceful degradation so a formatting slip never
+    shows the user a garbled "TITLE: ..." response.
     """
-    match = _TITLE_ANSWER_RE.match(raw_text.strip())
-    if not match:
-        return None, raw_text.strip()
-    title, answer = match.groups()
+    raw_text = raw_text.strip()
+    match = _TITLE_ANSWER_CITATIONS_RE.match(raw_text)
+    if match:
+        title, answer, _citations = match.groups()
+    else:
+        match = _TITLE_ANSWER_RE.match(raw_text)
+        if not match:
+            return None, raw_text
+        title, answer = match.groups()
     title = title.strip()
     if not title or title == _NO_PREVIOUS_TITLE:
         title = None
@@ -218,12 +224,8 @@ def answer_question(
     is given to the generation model as prior turns -- see
     _build_history_messages -- so it can resolve a follow-up question
     against what was actually discussed earlier, e.g. "what about part-time
-    employees?" after a question about full-time PTO. The same history also
-    feeds _condense_question, which rewrites the follow-up into a
-    standalone search query before retrieval runs -- retrieval sees that
-    rewritten query, not the raw follow-up text, though the generation call
-    still receives (and judges rule 2 against) the user's original wording
-    via {question}.
+    employees?" after a question about full-time PTO. Retrieval is
+    unaffected: it still searches on only the current question's text.
 
     Returns one of several fixed responses (with empty sources) instead of a
     grounded content answer when one isn't appropriate. Two of these are
@@ -274,9 +276,6 @@ def answer_question(
     fallback_dangerous = config_store.get("generation", "fallback_dangerous", FALLBACK_DANGEROUS)
     generation_model = config_store.get("generation", "model", GENERATION_MODEL)
     generation_temperature = config_store.get("generation", "temperature", GENERATION_TEMPERATURE)
-    condense_question_prompt = config_store.get(
-        "generation", "condense_question_prompt", CONDENSE_QUESTION_SYSTEM_PROMPT
-    )
 
     question = (question or "").strip()
     if not question:
@@ -292,12 +291,9 @@ def answer_question(
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
 
     history_messages = _build_history_messages(chat_history)
-    search_query = _condense_question(
-        question, history_messages, generation_model, condense_question_prompt
-    )
 
     retriever = get_retriever()
-    docs = retriever.invoke(search_query)
+    docs = retriever.invoke(question)
 
     if not docs:
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
@@ -309,25 +305,33 @@ def answer_question(
     # config-editable system_prompt -- see prompt.py's docstring for why
     # it's a separate, non-editable constant rather than folded into
     # SYSTEM_PROMPT itself.
+    # {user_question} appears both inside system_prompt's <input_data> block
+    # and in this final human turn -- ChatPromptTemplate fills the same
+    # invoke() key into every template that references it, so the model
+    # sees the question once written into <input_data> (as the new prompt's
+    # spec expects it delivered) and once more as the actual last turn
+    # (still needed: a chat completion wants its last message to be from
+    # the user, and this is also what {question} used to be named before
+    # the prompt rewrite -- see prompt.py's docstring).
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", INJECTION_DEFENSE_PREAMBLE + system_prompt),
             MessagesPlaceholder("chat_history"),
-            ("human", "{question}"),
+            ("human", "{user_question}"),
         ]
     )
     chain = prompt | llm
 
-    # These fixed strings are interpolated into system_prompt's rule 2 (see
-    # prompt.py) so editing one of these config values updates both what the
-    # model is told to say AND what this function compares its output
-    # against below -- editing one without the other would otherwise
-    # silently break the fallback-detection check.
+    # These fixed strings are interpolated into system_prompt's routing
+    # section (see prompt.py) so editing one of these config values updates
+    # both what the model is told to say AND what this function compares
+    # its output against below -- editing one without the other would
+    # otherwise silently break the fallback-detection check.
     response = chain.invoke(
         {
             "chat_history": history_messages,
             "context": context,
-            "question": question,
+            "user_question": question,
             "previous_title": previous_title or _NO_PREVIOUS_TITLE,
             "fallback_greeting": fallback_greeting,
             "fallback_handoff": fallback_handoff,

@@ -40,6 +40,7 @@ from pydantic import BaseModel
 
 from assistant import auth, config_store, db, pricing, rate_limit
 from assistant.embeddings import resolve_embed_model_name
+from assistant.ingestion import store as ingestion_store
 from assistant.orchestration.client import get_temporal_client
 from assistant.orchestration.config import TASK_QUEUE
 from assistant.orchestration.workflows.ingestion_workflow import IngestDocumentsWorkflow
@@ -234,6 +235,12 @@ class AskResponse(BaseModel):
 
 class UploadResponse(BaseModel):
     queued: list[str]  # accepted (post-rename, if any), now awaiting admin approval
+    skipped: list[str] = []  # duplicate CONTENT of something already in the library or pending
+    renamed: dict[str, str] = {}  # original filename -> the disambiguated name it was stored as
+
+
+class AdminUploadResponse(BaseModel):
+    ingested: list[str]  # accepted (post-rename, if any) and immediately searchable -- no approval step
     skipped: list[str] = []  # duplicate CONTENT of something already in the library or pending
     renamed: dict[str, str] = {}  # original filename -> the disambiguated name it was stored as
 
@@ -442,6 +449,90 @@ def list_pending_for_admin(_: None = Depends(get_current_admin)) -> list[AdminPe
     return [AdminPendingDocumentInfo(**d) for d in db.list_all_pending_documents()]
 
 
+@app.get("/admin/documents", response_model=list[DocumentInfo])
+def list_documents_for_admin(_: None = Depends(get_current_admin)) -> list[DocumentInfo]:
+    """Same data as GET /library, but reachable with the admin JWT -- the
+    admin app has no regular user session to satisfy get_current_user, and
+    needs this list to show a Delete button per document.
+    """
+    return [DocumentInfo(**d) for d in db.list_documents()]
+
+
+@app.post("/admin/documents", response_model=AdminUploadResponse)
+async def admin_upload_documents(
+    files: list[UploadFile] = File(...), _: None = Depends(get_current_admin)
+) -> AdminUploadResponse:
+    """Admin-direct upload: ingests immediately, no approval step -- unlike
+    POST /ingest (a regular user's upload, staged for review), an admin
+    approving their own upload would just be a pointless extra click. Same
+    dedupe-by-content-hash and dedupe-by-filename-collision rules as
+    POST /ingest (see _dedupe_filename), checked against both the live
+    library and the pending queue so this can't collide with either.
+
+    Unlike approve_pending_document, a failed workflow here removes the file
+    it just wrote instead of leaving it in place -- approve leaves it
+    because re-approving the SAME pending row retries from that exact staged
+    copy; there's no equivalent pending row here to retry from, so an
+    unembedded, un-tracked PDF left behind would just be dead weight.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    reserved_hashes = db.list_all_content_hashes() | db.list_pending_content_hashes()
+    reserved_names = db.list_all_filenames() | db.list_pending_filenames()
+    admin_user_id = db.ensure_admin_user()
+
+    ingested = []
+    skipped = []
+    renamed = {}
+    for uploaded in files:
+        name = uploaded.filename or ""
+        if not name.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail=f"{name!r} is not a PDF.")
+
+        content = await uploaded.read()
+        content_hash = hashlib.sha256(content).hexdigest()
+
+        if content_hash in reserved_hashes:
+            skipped.append(name)
+            continue
+
+        stored_name = _dedupe_filename(name, reserved_names)
+        if stored_name != name:
+            renamed[name] = stored_name
+
+        dest = DATA_DIR / stored_name
+        dest.write_bytes(content)
+
+        try:
+            client = await get_temporal_client()
+            results = await client.execute_workflow(
+                IngestDocumentsWorkflow.run,
+                [str(dest)],
+                id=f"ingest-{uuid.uuid4()}",
+                task_queue=TASK_QUEUE,
+            )
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail=_unwrap_temporal_error(e)) from e
+
+        chunk_count = results[0]["chunk_count"]
+        embed_tokens = results[0]["embed_tokens"]
+
+        db.add_document(admin_user_id, stored_name, chunk_count, content_hash)
+        db.log_admin_action("upload", stored_name, admin_user_id)
+        if embed_tokens:
+            cost = pricing.embedding_cost_usd(embed_tokens)
+            db.log_token_usage("embedding", resolve_embed_model_name(), None, None, embed_tokens, cost)
+
+        reserved_hashes.add(content_hash)
+        reserved_names.add(stored_name)
+        ingested.append(stored_name)
+
+    return AdminUploadResponse(ingested=ingested, skipped=skipped, renamed=renamed)
+
+
 @app.post("/admin/pending-documents/{pending_id}/approve")
 async def approve_pending_document(pending_id: str, _: None = Depends(get_current_admin)) -> dict:
     """Runs the same ingestion pipeline /ingest used to run inline before --
@@ -499,6 +590,37 @@ def reject_pending_document(pending_id: str, _: None = Depends(get_current_admin
         staged_path.unlink()
     db.mark_pending_rejected(pending_id)
     return {"rejected": pending["filename"]}
+
+
+@app.delete("/admin/documents/{filename}")
+def delete_document(filename: str, _: None = Depends(get_current_admin)) -> dict:
+    """Removes a document from the shared library entirely: its Chroma
+    chunks (so it stops being retrievable/citable), its `documents` row (so
+    it disappears from every user's Library sidebar), and the PDF itself
+    from disk. Chroma first -- if that fails, the documents row and file
+    stay put and the admin can just retry, rather than the library still
+    listing (and /documents/{filename} still serving) a file whose chunks
+    are already gone.
+
+    filename is reduced to its final path component before touching the
+    filesystem, same defense as GET /documents/{filename} -- this is an
+    admin-only endpoint, but there's no reason to trust the path segment
+    over that anyway.
+    """
+    safe_name = Path(filename).name
+
+    ingestion_store.delete_document(safe_name)
+
+    existed = db.remove_document(safe_name)
+    if not existed:
+        raise HTTPException(status_code=404, detail="No such document.")
+
+    path = _DATA_DIR_RESOLVED / safe_name
+    if path.is_file():
+        path.unlink()
+
+    db.log_admin_action("delete", safe_name, db.ensure_admin_user())
+    return {"deleted": safe_name}
 
 
 @app.get("/admin/monitoring", response_model=MonitoringResponse)

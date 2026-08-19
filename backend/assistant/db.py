@@ -290,6 +290,46 @@ def list_documents() -> list[dict]:
     return [{"name": r[0], "chunk_count": r[1], "ingested_at": r[2].isoformat()} for r in rows]
 
 
+# Placeholder users row, attribution-only -- an admin upload (unlike a
+# regular user's, staged and later approved under the uploader's own
+# account) has no real person to attribute uploaded_by/performed_by to: the
+# admin password is a shared secret, not a per-user credential. password_hash
+# stays NULL, which login() already treats as "reject" (`not password_hash`
+# short-circuits before ever calling verify_password), so this id can never
+# be logged into as a regular user; create_account's ON CONFLICT DO NOTHING
+# also means no one can register this username out from under it.
+_ADMIN_USER_ID = "admin"
+
+
+def ensure_admin_user() -> str:
+    """Idempotent -- call before attributing a direct admin upload. Returns
+    the id to use as uploaded_by/performed_by.
+    """
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO users (id, password_hash) VALUES (%s, NULL) ON CONFLICT (id) DO NOTHING",
+            (_ADMIN_USER_ID,),
+        )
+    return _ADMIN_USER_ID
+
+
+def remove_document(filename: str) -> bool:
+    """Deletes the documents row for filename. Returns whether a row
+    actually existed to delete -- a delete is always admin-initiated (there's
+    no non-admin path to it), so unlike add_document/log_admin_action's
+    "upload" action (attributed to whoever uploaded it, since an admin only
+    approved someone else's submission), there's no original-uploader story
+    to tell here -- the caller attributes this to the admin placeholder
+    account instead (see ensure_admin_user), not this row's uploaded_by.
+    """
+    with _pool.connection() as conn:
+        row = conn.execute(
+            "DELETE FROM documents WHERE filename = %s RETURNING filename",
+            (filename,),
+        ).fetchone()
+    return row is not None
+
+
 def add_document(user_id: str, filename: str, chunk_count: int, content_hash: str | None) -> None:
     """Upserts on filename -- a defensive no-op-safe overwrite rather than a
     duplicate-key error, in case this filename already has a row (e.g.

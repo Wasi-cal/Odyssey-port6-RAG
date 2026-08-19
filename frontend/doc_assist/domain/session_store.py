@@ -1,11 +1,15 @@
 """Wraps st.session_state so the rest of the app never touches the raw
 session dict directly.
 
-Sessions, messages, and the document library are fetched from the backend
-(Postgres-backed, see backend/assistant/db.py) on first load of each
-Streamlit connection and cached here for the rest of it -- this class is
-never their source of truth, just a per-connection cache, so a page refresh
-or container restart never loses them.
+Sessions and messages are fetched from the backend (Postgres-backed, see
+backend/assistant/db.py) on first load of each Streamlit connection and
+cached here for the rest of it -- this class is never their source of
+truth, just a per-connection cache, so a page refresh or container restart
+never loses them. The document library and pending-uploads list are
+re-fetched on every rerun instead (see refresh_library/refresh_pending_uploads
+below), since those can change from outside this session entirely (another
+tab's upload, an admin's approval) and need to show up without the user
+reloading the page.
 
 Each past chat is also addressable by its id via the "chat" URL query param
 (?chat=<uuid>, the same uuid backend/assistant/db.py already mints for
@@ -37,14 +41,18 @@ class SessionStore:
         if not st.session_state.sessions_loaded:
             self._load_sessions_from_backend()
 
-        if st.session_state.get("library") is None:
-            fetched = self.api.get_library()
-            if fetched is not None:
-                st.session_state.library = fetched
-
         # Unconditional, every rerun (not just once) -- this is how an admin
         # approval elsewhere becomes visible here without the user doing
-        # anything: any interaction reruns the script, which re-fetches this.
+        # anything: any interaction (or app.py's scoped autorefresh, while
+        # something is actually pending -- see its own comment for why it's
+        # scoped rather than always-on) reruns the script, which re-fetches
+        # both of these. library used to only be fetched once and cached for
+        # the rest of the browser session -- a newly-approved document never
+        # appeared until a full page reload, since nothing ever invalidated
+        # that first fetch. Library is refreshed BEFORE pending uploads so
+        # refresh_pending_uploads (below) can check the just-updated library
+        # to tell an approval apart from a rejection.
+        self.refresh_library()
         self.refresh_pending_uploads()
 
         if "pending_question" not in st.session_state:
@@ -160,10 +168,35 @@ class SessionStore:
         """Same None-means-transient-failure rationale as refresh_library --
         called on every rerun (see sidebar.py) so an admin's approval shows
         up here without the user having to do anything else.
+
+        Also fires a st.toast() the moment a filename that was pending on
+        the LAST call is no longer pending on THIS call -- the admin
+        resolved it (approved or rejected) sometime in between. Diffing
+        against the previous in-memory list (not, say, a "seen" set that
+        persists forever) means this naturally toasts exactly once: the
+        run where the transition is first observed updates
+        st.session_state.pending_uploads immediately, so the same filename
+        can't show up as "previously pending" again on a later call.
+        Approved vs. rejected is told apart by checking self.library
+        (already refreshed by the time this runs -- see __init__) rather
+        than a second API call: approved means it's now in the library,
+        rejected means it just vanished.
         """
+        previously_pending = {p["filename"] for p in self.pending_uploads}
         fetched = self.api.get_pending_documents()
-        if fetched is not None:
-            st.session_state.pending_uploads = fetched
+        if fetched is None:
+            return
+        st.session_state.pending_uploads = fetched
+
+        resolved = previously_pending - {p["filename"] for p in fetched}
+        if not resolved:
+            return
+        library_names = {doc["name"] for doc in self.library}
+        for filename in resolved:
+            if filename in library_names:
+                st.toast(f"✅ **{filename}** was approved and is now in the library.")
+            else:
+                st.toast(f"❌ **{filename}** was rejected.")
 
     # -- pending question (set by a suggestion-chip click) ------------------
     @property

@@ -26,100 +26,149 @@
 # out_of_scope items only need id/question/type -- omit expected_source,
 # expected_pages, and key_facts entirely for those.
 #
-# This set is built against the three sample HR handbooks in data/pdfs/
-# (Cedar Valley, Harborlight, Northstar Ridge) -- if you swap in your own
-# PDFs, replace these questions with ones grounded in your own documents.
+# This set is built against Calfus's real internal policy library in
+# data/pdfs/ -- it replaces an earlier version built against three fictional
+# sample HR handbooks (Cedar Valley, Harborlight, Northstar Ridge). Those got
+# deleted from the live library once real documents were uploaded (they were
+# only ever placeholder/test content, mixed into the same searchable corpus
+# as the real policies and actively causing wrong answers -- a company-
+# unspecified WFH question would retrieve a fictional company's policy ahead
+# of the real one). If you ever swap in a different document set again,
+# replace these questions with ones grounded in whatever's actually live.
+#
+# q9 and q10 are deliberately NOT simple lookups -- they're the same
+# reasoning classes that were found broken in production and fixed in
+# retrieval/prompt.py (grounding rule 10: comparisons against a stated
+# limit; rule 7's addition: a scenario against a policy's stated scope). Both
+# classes were previously untested, which is exactly how they shipped
+# broken -- q10 is the literal real question ("will my travel expenses be
+# covered if I travel for personal reasons") that surfaced the scope bug.
 
-# -- Cedar Valley Consumer Systems --------------------------------------
+# -- Background Verification -------------------------------------------
 
 - id: q1
-  question: "How many weeks of paid parental leave does Cedar Valley Consumer Systems offer?"
+  question: "How many days after joining does a new hire have to complete Background Verification, and how many extra days does HR allow if it's delayed?"
   type: in_scope
-  expected_source: "Cedar_Valley_HR_Policy_Handbook.pdf"
-  expected_pages: [3]
+  expected_source: "BGV Policy_Ver1.0.pdf"
+  expected_pages: [2, 3]
   key_facts:
-    - "Up to 10 weeks of paid parental leave"
-    - "Employees must complete six months of continuous service to be eligible"
+    - "Must be completed within 60 days of the date of joining"
+    - "HR allows 15 more days to get the checks cleared if delayed"
+
+# -- Employee Referral ----------------------------------------------------
 
 - id: q2
-  question: "What is the domestic hotel reimbursement limit per night at Cedar Valley?"
+  question: "What is the referral bonus for a candidate with 6 to 8 years of experience, and how should the referral be submitted?"
   type: in_scope
-  expected_source: "Cedar_Valley_HR_Policy_Handbook.pdf"
-  expected_pages: [2, 4]  # stated in prose on p.2 and repeated in the limits table on p.4
-  key_facts:
-    - "$210 per night before taxes for domestic hotel stays"
-
-# -- Harborlight Manufacturing & Digital Services ------------------------
-
-- id: q3
-  question: "How many business days per year can a Harborlight employee work remotely for a short-term personal need?"
-  type: in_scope
-  expected_source: "Harborlight_HR_Policy_Handbook.pdf"
-  expected_pages: [2]
-  key_facts:
-    - "Up to 20 business days in a calendar year"
-    - "Request must be submitted at least five business days before the start date"
-
-- id: q4
-  question: "How many vacation days per year does a Harborlight employee with 6 years of tenure receive?"
-  type: in_scope
-  expected_source: "Harborlight_HR_Policy_Handbook.pdf"
-  expected_pages: [4]
-  key_facts:
-    - "18 vacation days per year for the 2-4 or 5-9 year tenure band"
-
-- id: q5
-  question: "How many weeks of company-paid parental leave does Harborlight provide, versus total parental leave eligibility?"
-  type: in_scope
-  expected_source: "Harborlight_HR_Policy_Handbook.pdf"
+  expected_source: "Calfus Crew - Employee Referral Policy_1.2.pdf"
   expected_pages: [3]
   key_facts:
-    - "Up to 12 weeks of parental leave total eligibility, after 12 months of service"
-    - "Four weeks of that leave is company-paid"
+    - "INR 70,000 referral bonus for 6-8 years of experience"
+    - "Submitted via email to employee.referral@calfus.com with the candidate's details"
 
-# -- Northstar Ridge Technologies -----------------------------------------
+# -- Confirmation (probation) -----------------------------------------------
+
+- id: q3
+  question: "Who issues the confirmation letter when probation performance is satisfactory, and what happens if performance is below expectations?"
+  type: in_scope
+  expected_source: "Confirmation Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "HR issues a Confirmation Letter to the employee"
+    - "Probation may be extended and a probation extension letter is issued"
+
+# -- Domestic Travel --------------------------------------------------------
+
+- id: q4
+  question: "What is the meal reimbursement rate for lunch during business travel, and how many days in advance must the travel desk be informed?"
+  type: in_scope
+  expected_source: "Travel Policy_Ver1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Rs. 300 for lunch/dinner"
+    - "Travel desk informed at least 15 days in advance"
+
+# -- India Relocation --------------------------------------------------------
+
+- id: q5
+  question: "How many days of guest house accommodation do relocating employees get, and what's the maximum reimbursement for transporting goods?"
+  type: in_scope
+  expected_source: "India Relocation Policy Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "10 days of accommodation"
+    - "Maximum of INR 75,000 for transportation of goods"
+
+# -- Rewards and Recognition --------------------------------------------------
 
 - id: q6
-  question: "How many days per week can a Northstar Ridge employee work remotely under the hybrid policy?"
+  question: "How many days before Calfus Connect must a Virtues in Action nomination be submitted, and who approves exceptions to this policy?"
   type: in_scope
-  expected_source: "Northstar_Ridge_HR_Policy_Handbook.pdf"
+  expected_source: "Rewards and Recognition Policy_Ver1.0.pdf"
   expected_pages: [2]
   key_facts:
-    - "Up to three days per week"
-    - "Default in-office days are Tuesday and Wednesday"
+    - "Nominated 7 days before Calfus Connect"
+    - "Exceptions require prior written approval from the India Head, in consultation with HR"
+
+# -- Certification Reimbursement ---------------------------------------------
 
 - id: q7
-  question: "How much paid sick leave do Northstar Ridge employees accrue?"
+  question: "What is the approval workflow for a certification reimbursement request, and when must the request be submitted?"
   type: in_scope
-  expected_source: "Northstar_Ridge_HR_Policy_Handbook.pdf"
-  expected_pages: [2]
+  expected_source: "Certification Reimbursement Policy_Ver1.0.pdf"
+  expected_pages: [3]
   key_facts:
-    - "8 hours of paid sick leave per completed month of employment"
-    - "Capped at 80 hours per calendar year"
+    - "Approval workflow is Reporting Manager, then Functional Head, then HRBP"
+    - "Must be submitted prior to certification enrolment"
+
+# -- Disciplinary -------------------------------------------------------------
 
 - id: q8
-  question: "How many vacation days per year does a Northstar Ridge employee with 4 years of tenure get?"
+  question: "Who should Information Security Violations be escalated to, and what is the first recommended disciplinary action?"
   type: in_scope
-  expected_source: "Northstar_Ridge_HR_Policy_Handbook.pdf"
-  expected_pages: [4]
+  expected_source: "Disciplinary Policy_Ver1.0.pdf"
+  expected_pages: [2, 4]
   key_facts:
-    - "18 vacation days per year (144 hours) for the 3-5 year tenure band"
+    - "Escalated directly to the CISO"
+    - "Verbal warning is the first recommended disciplinary action"
+
+# -- Reasoning: comparison against a stated limit ------------------------
+
+- id: q9
+  question: "Can a relocating employee stay in the company guest house for 15 days without approval?"
+  type: in_scope
+  expected_source: "India Relocation Policy Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Guest house accommodation is provided for 10 days"
+    - "Any extension beyond 10 days needs prior approval from the India Head"
+
+# -- Reasoning: scenario against a policy's stated scope ------------------
+
+- id: q10
+  question: "Will my personal travel expenses be reimbursed under the Travel Policy?"
+  type: in_scope
+  expected_source: "Travel Policy_Ver1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Personal expenses incurred during travel are not reimbursable"
 
 # -- Out of scope ----------------------------------------------------------
 
-- id: q9
+- id: q11
   question: "What's the weather forecast for tomorrow?"
   type: out_of_scope
 
-- id: q10
-  question: "What is Cedar Valley Consumer Systems' stock ticker symbol?"
+- id: q12
+  question: "What is Calfus Technologies' stock ticker symbol?"
   type: out_of_scope
-  # "Near miss": a real company name from the library, but the handbooks
-  # don't cover anything about stock/investor information -- checks that
-  # retrieval doesn't hallucinate just because the company name matched.
+  # "Near miss": a real company name from the library, but none of the
+  # policies cover stock/investor information -- checks that retrieval
+  # doesn't hallucinate just because the company name matched.
 
-- id: q11
+- id: q13
   question: "What is the employer's 401(k) matching percentage?"
   type: out_of_scope
-  # "Near miss": a very ordinary HR topic an employee might assume is in
-  # here, but none of the three handbooks mention retirement benefits at all.
+  # "Near miss": a very ordinary benefits topic an employee might assume is
+  # covered, but this is an India-based policy library (401(k) is a US
+  # retirement plan) -- none of the documents mention it.

@@ -3,6 +3,7 @@ wires them together. app.py just constructs and runs one of these.
 """
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from .api.client import ApiClient
 from .domain import auth
@@ -62,6 +63,26 @@ class DocAssistApp:
         question = self.composer.render(self.store)
         if question:
             self._ask_and_append(session, question)
+        elif self.store.pending_uploads:
+            # Scoped autorefresh: only while this user actually has
+            # something waiting on an admin, and never on a run that's
+            # about to make the slow /ask call (the `elif`, not `if`,
+            # above). An earlier version of this ran unconditionally on
+            # every page load and broke chat outright -- Streamlit reruns
+            # the ENTIRE script on any rerun trigger, including this
+            # timer's, which cancels whatever's currently running; /ask can
+            # legitimately take longer than a short interval, so a
+            # standing timer was intermittently killing in-flight answers
+            # before they ever got rendered or saved to session state (see
+            # git history). Scoping to "nothing to ask right now AND
+            # something pending" shrinks that window a lot -- down to just
+            # this user submitting a new question in the few seconds after
+            # a PRIOR run's already-ticking timer was armed, and only while
+            # they have an upload actually awaiting review -- but doesn't
+            # eliminate it, since a rerun triggered anywhere still cancels
+            # whatever else is in flight; a real fix would need a push
+            # channel (websocket/SSE), not a client-side poll timer.
+            st_autorefresh(interval=15_000, key="pending-uploads-autorefresh")
 
     def _ask_and_append(self, session: ChatSession, question: str) -> None:
         idx = len(session.messages)

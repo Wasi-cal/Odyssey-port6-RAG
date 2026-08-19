@@ -5,6 +5,9 @@ Separate process/entrypoint from app.py (the chatbot) on purpose -- run with
 independent from the chatbot's regular user login.
 """
 
+import html
+import urllib.parse
+
 import requests
 import streamlit as st
 
@@ -66,33 +69,54 @@ st.markdown(
         border-color: #252A40 !important;
     }
 
-    /* Inputs */
+    /* Inputs
+       BaseWeb wraps the field in nested divs, each able to carry a border --
+       that's the "box inside a box". Border only the outer wrapper, then
+       flatten every inner layer (and the reveal-button container) so exactly
+       one box remains. */
     [data-testid="stTextInput"] label {
         color: var(--text);
         font-size: 12px;
         font-weight: 600;
     }
 
-    [data-testid="stTextInput"] input {
+    [data-testid="stTextInput"] div[data-baseweb="input"] {
         border-radius: 9px;
-        border-color: var(--line);
-        font-size: 13px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        transition: border-color .15s, box-shadow .15s;
     }
 
-    [data-testid="stTextInput"] input:focus {
+    [data-testid="stTextInput"] div[data-baseweb="input"]:focus-within {
         border-color: #C9CDFD;
         box-shadow: 0 0 0 2px #EEF0FF;
     }
 
-    /* Login */
-    .login-card {
-        max-width: 410px;
-        margin: 11vh auto 0;
-        padding: 34px;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 20px;
-        box-shadow: 0 16px 45px rgba(23, 27, 46, 0.07);
+    /* Flatten every inner layer: nested wrapper, the input, and the
+       password reveal button. None of them should draw their own box. */
+    [data-testid="stTextInput"] div[data-baseweb="input"] > div,
+    [data-testid="stTextInput"] div[data-baseweb="input"] input,
+    [data-testid="stTextInput"] div[data-baseweb="input"] button {
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+
+    [data-testid="stTextInput"] div[data-baseweb="input"] input {
+        font-size: 13px;
+    }
+
+    [data-testid="stTextInput"] div[data-baseweb="input"] button {
+        color: var(--muted);
+    }
+
+    [data-testid="stTextInput"] div[data-baseweb="input"] button:hover {
+        color: var(--text);
+    }
+
+    /* Remove the "Press Enter to submit form" hint under inputs in forms */
+    [data-testid="InputInstructions"] {
+        display: none;
     }
 
     .brand {
@@ -267,11 +291,6 @@ st.markdown(
         .block-container {
             padding: 28px 18px 48px;
         }
-
-        .login-card {
-            margin-top: 7vh;
-            padding: 26px;
-        }
     }
     </style>
     """,
@@ -317,6 +336,55 @@ def _get(path: str):
     return resp.json()
 
 
+def _delete(path: str) -> bool:
+    try:
+        resp = requests.delete(
+            f"{API_BASE_URL}{path}",
+            headers=_headers(),
+            timeout=30,
+        )
+    except requests.exceptions.RequestException:
+        st.error(f"Could not reach the API at {API_BASE_URL}.")
+        return False
+
+    if resp.status_code == 401:
+        st.session_state.admin_token = None
+        st.rerun()
+
+    if resp.status_code != 200:
+        st.error(_error_detail(resp, "Request failed."))
+        return False
+
+    return True
+
+
+def _upload_documents(files) -> dict | None:
+    """POST /admin/documents (multipart) -- distinct from _post/_get/_delete
+    since this is the only admin call that sends a body other than JSON.
+    Returns the parsed response (queued/skipped/renamed) or None on failure.
+    """
+    try:
+        resp = requests.post(
+            f"{API_BASE_URL}/admin/documents",
+            headers=_headers(),
+            files=[("files", (f.name, f.getvalue(), "application/pdf")) for f in files],
+            timeout=120,
+        )
+    except requests.exceptions.RequestException:
+        st.error(f"Could not reach the API at {API_BASE_URL}.")
+        return None
+
+    if resp.status_code == 401:
+        st.session_state.admin_token = None
+        st.rerun()
+
+    if resp.status_code != 200:
+        st.error(_error_detail(resp, "Upload failed."))
+        return None
+
+    return resp.json()
+
+
 def _post(path: str) -> bool:
     try:
         resp = requests.post(
@@ -345,34 +413,51 @@ def _post(path: str) -> bool:
 
 
 def _render_login() -> None:
-    _, col, _ = st.columns([1, 1, 1])
+    # Card styling is injected here (not in the global block) so it applies
+    # only on the login page. That lets it safely target the single form on
+    # this page as the card, without affecting the dashboard's forms. Using a
+    # real st.form container also holds the widgets *inside* the card and gives
+    # Enter-to-submit for free.
+    st.markdown(
+        """
+        <style>
+        [data-testid="stForm"] {
+            max-width: 410px;
+            margin: 11vh auto 0;
+            padding: 34px 34px 28px;
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 20px;
+            box-shadow: 0 16px 45px rgba(23, 27, 46, 0.07);
+        }
+        [data-testid="stForm"] [data-testid="stFormSubmitButton"] button {
+            margin-top: 6px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with col:
+    with st.form("admin-login"):
         st.markdown(
             """
-            <div class="login-card">
-                <div class="brand">
-                    <div class="brand-icon">◈</div>
-                    <div class="brand-name">Doc Assist</div>
-                </div>
-                <div class="kicker">Administration</div>
-                <div class="login-title">Welcome back.</div>
-                <p class="login-subtitle">
-                    Monitor document ingestion, approvals, usage, and
-                    administrative activity from one place.
-                </p>
+            <div class="brand">
+                <div class="brand-icon">◈</div>
+                <div class="brand-name">Doc Assist</div>
             </div>
+            <div class="kicker">Administration</div>
+            <div class="login-title">Welcome back.</div>
+            <p class="login-subtitle">
+                Monitor document ingestion, approvals, usage, and
+                administrative activity from one place.
+            </p>
             """,
             unsafe_allow_html=True,
         )
 
-        password = st.text_input(
-            "Admin password",
-            type="password",
-            key="admin-login-password",
-        )
+        password = st.text_input("Admin password", type="password")
 
-        submitted = st.button(
+        submitted = st.form_submit_button(
             "Log in",
             type="primary",
             use_container_width=True,
@@ -503,12 +588,18 @@ def _render_monitoring() -> None:
         with c_info:
             uploaded_at = doc["uploaded_at"][:16].replace("T", " ")
 
+            # Escape every interpolated value: filename and uploaded_by are
+            # user-controlled at upload time, and this block is rendered with
+            # unsafe_allow_html=True. Without escaping, a document named e.g.
+            # `<img src=x onerror=...>.pdf` would execute as stored XSS in the
+            # admin's authenticated session.
             st.markdown(
                 f"""
                 <div class="doc-row">
-                    <div class="doc-name">{doc["filename"]}</div>
+                    <div class="doc-name">{html.escape(doc["filename"])}</div>
                     <div class="doc-meta">
-                        Uploaded by {doc["uploaded_by"]} · {uploaded_at}
+                        Uploaded by {html.escape(doc["uploaded_by"])}
+                        · {html.escape(uploaded_at)}
                     </div>
                 </div>
                 """,
@@ -539,6 +630,97 @@ def _render_monitoring() -> None:
                 ):
                     st.rerun()
 
+    st.markdown(
+        """
+        <div class="section-heading">Library</div>
+        <div class="section-caption">
+            Documents currently searchable by the assistant. An admin upload is ingested
+            immediately, no approval step -- deleting one removes it from the vector
+            index and the shared library immediately. Neither is reversible.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("admin-upload-form", clear_on_submit=True):
+        new_files = st.file_uploader(
+            "Upload documents",
+            type=["pdf"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+        submitted = st.form_submit_button("Upload", type="primary")
+
+    if submitted:
+        if not new_files:
+            st.warning("Choose at least one PDF first.")
+        else:
+            with st.spinner(f"Ingesting {len(new_files)} document(s)…"):
+                result = _upload_documents(new_files)
+            if result is not None:
+                if result["ingested"]:
+                    st.success(f"Ingested: {', '.join(result['ingested'])}")
+                if result["renamed"]:
+                    renames = ", ".join(f"{old} → {new}" for old, new in result["renamed"].items())
+                    st.info(f"Renamed to avoid a filename collision: {renames}")
+                if result["skipped"]:
+                    st.warning(f"Already in the library (identical content), skipped: {', '.join(result['skipped'])}")
+                st.rerun()
+
+    library = _get("/admin/documents") or []
+
+    if not library:
+        st.markdown(
+            '<div class="empty-state">No documents in the library yet.</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Two-step confirm (click Delete, then confirm) -- this permanently drops
+    # a document's chunks from Chroma with no undo, so a single mis-click
+    # shouldn't be able to do that.
+    if "confirm_delete" not in st.session_state:
+        st.session_state.confirm_delete = None
+
+    for doc in library:
+        name = doc["name"]
+        ingested_at = doc["ingested_at"][:16].replace("T", " ")
+
+        c_info, c_action = st.columns([7, 1.2])
+
+        with c_info:
+            st.markdown(
+                f"""
+                <div class="doc-row">
+                    <div class="doc-name">{html.escape(name)}</div>
+                    <div class="doc-meta">
+                        {doc["chunk_count"]:,} chunks · ingested {html.escape(ingested_at)}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with c_action:
+            if st.session_state.confirm_delete == name:
+                if st.button(
+                    "Confirm",
+                    key=f"confirm-delete-{name}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    with st.spinner("Deleting…"):
+                        if _delete(f"/admin/documents/{urllib.parse.quote(name, safe='')}"):
+                            st.session_state.confirm_delete = None
+                            st.rerun()
+            else:
+                if st.button(
+                    "Delete",
+                    key=f"delete-{name}",
+                    use_container_width=True,
+                ):
+                    st.session_state.confirm_delete = name
+                    st.rerun()
+
     with st.expander("Admin activity"):
         entries = _get("/admin/audit-log") or []
 
@@ -547,8 +729,12 @@ def _render_monitoring() -> None:
 
         for entry in entries:
             when = entry["performed_at"][:16].replace("T", " ")
+            # st.caption renders markdown with HTML escaped by default, so
+            # this is not an HTML-injection vector. Wrapping the filename in a
+            # code span keeps stray markdown characters (e.g. * or _) from
+            # mangling the line.
             st.caption(
-                f"Uploaded **{entry['filename']}** · "
+                f"Uploaded `{entry['filename']}` · "
                 f"{entry['performed_by']} · {when}"
             )
 
@@ -625,7 +811,7 @@ def _render_monitoring() -> None:
     st.markdown(
         f"""
         <div class="admin-footer">
-            Doc Assist Admin · API {API_BASE_URL}
+            Doc Assist Admin · API {html.escape(API_BASE_URL)}
         </div>
         """,
         unsafe_allow_html=True,

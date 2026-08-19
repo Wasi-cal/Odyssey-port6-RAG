@@ -2,6 +2,7 @@
 # Never imports langchain/chromadb/etc. directly, so it doesn't need any of
 # the backend's (much heavier) RAG dependency stack.
 streamlit>=1.38.0,<2.0.0
+streamlit-autorefresh>=1.0.1,<2.0.0
 requests>=2.31.0,<3.0.0
 python-dotenv>=1.0.1,<2.0.0
 pydantic>=2.0,<3.0

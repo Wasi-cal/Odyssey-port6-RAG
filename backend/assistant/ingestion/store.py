@@ -39,3 +39,12 @@ def get_vector_store() -> Chroma:
         client_settings=ChromaSettings(anonymized_telemetry=False, is_persistent=True),
         collection_metadata={"hnsw:space": "cosine"},
     )
+
+
+def delete_document(filename: str) -> None:
+    """Removes every chunk whose "source" metadata matches filename from the
+    Chroma collection -- the same delete-by-metadata call pipeline.py already
+    makes before a re-ingest (see its idempotent delete-then-add), just
+    without the follow-up add_documents.
+    """
+    get_vector_store()._collection.delete(where={"source": filename})
