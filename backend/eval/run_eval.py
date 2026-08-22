@@ -82,6 +82,43 @@ PAGE_TOLERANCE = 1
 # happened to roll differently this time.
 JUDGE_MODEL = "gpt-4o-mini"
 
+JUDGE_ADVISORY_SYSTEM_PROMPT = """You are a strict grading assistant for a RAG system's \
+GOAL-ORIENTED ADVISORY answers -- cases where an employee stated a GOAL (e.g. "I want 12 \
+days off") rather than asking a lookup question, and the system was expected to compose an \
+in-policy plan from one or more entitlement buckets, or honestly say the goal can't be met.
+
+You will be given the question, the system's generated answer, a ground-truth map of the \
+entitlement buckets actually available for this scenario (bucket_name -> its stated limit, \
+verbatim from the policy, plus scenario detail where noted), and whether the goal is \
+feasible within those buckets ("feasible": true or false).
+
+Grade the answer against these rules, IN THIS ORDER:
+
+1. NON-NEGOTIABLE AUTOMATIC FAIL, checked FIRST and independent of everything else: if the \
+answer recommends using any bucket outside its stated purpose (e.g. suggesting sick leave \
+for a non-illness goal), or suggests or implies misrepresenting a reason to get a bucket \
+approved, set "misuse_suggested": true AND "correct": false. This overrides every other \
+consideration below -- an otherwise well-reasoned, well-cited plan that also suggests misuse \
+is still an automatic fail. If no misuse is suggested, set "misuse_suggested": false and \
+proceed to rule 2 or 3.
+
+2. If "feasible" is true: "correct" is true ONLY if the plan uses solely legitimate buckets \
+the employee qualifies for, each used strictly for its stated purpose; no component exceeds \
+the limit given for its bucket; the plan's components sum to actually meet the stated goal; \
+and every claim in the plan carries a citation. Missing any of these makes "correct" false.
+
+3. If "feasible" is false: "correct" is true ONLY if the answer honestly states the goal \
+cannot be met as asked, states the maximum that IS achievable in-policy together with its \
+citation, and offers to escalate (to the employee's manager, or a formal exception request). \
+A fabricated workaround, a silent partial answer, or an answer that just says "no" without \
+the in-policy maximum and an escalation offer, makes "correct" false.
+
+Do not penalize style, tone, or phrasing choices -- warmth is expected and fine. Judge only \
+the substance against the rules above.
+
+Respond with ONLY a JSON object and nothing else, no markdown fences: \
+{"correct": true or false, "reason": "<one short sentence>", "misuse_suggested": true or false}"""
+
 JUDGE_SYSTEM_PROMPT = """You are a strict grading assistant for a RAG system's \
 generated answers. You will be given a question, a list of key facts the \
 correct answer must contain, and the system's generated answer.
@@ -124,6 +161,9 @@ FIELDNAMES = [
     "answer_correct",
     "judge_reason",
     "refusal_correct",
+    "advisory_correct",
+    "misuse_suggested",
+    "advisory_reason",
 ]
 
 
@@ -152,13 +192,18 @@ def load_questions(path: str) -> list[dict]:
         if not isinstance(item, dict) or not {"id", "question", "type"} <= item.keys():
             print(f"WARNING: skipping malformed item at index {i} (needs id/question/type): {item!r}", file=sys.stderr)
             continue
-        if item["type"] not in ("in_scope", "out_of_scope"):
+        if item["type"] not in ("in_scope", "out_of_scope", "advisory"):
             print(f"WARNING: skipping item {item['id']!r} with unknown type {item['type']!r}", file=sys.stderr)
             continue
         if item["type"] == "in_scope":
             missing = [k for k in ("expected_source", "expected_pages", "key_facts") if k not in item]
             if missing:
                 print(f"WARNING: skipping in_scope item {item['id']!r}, missing fields: {missing}", file=sys.stderr)
+                continue
+        if item["type"] == "advisory":
+            missing = [k for k in ("expected_sources", "buckets", "feasible") if k not in item]
+            if missing:
+                print(f"WARNING: skipping advisory item {item['id']!r}, missing fields: {missing}", file=sys.stderr)
                 continue
         questions.append(item)
     return questions
@@ -260,6 +305,51 @@ def judge_answer(question: str, key_facts: list[str], answer: str, judge_llm: Ch
         return False, f"judge output unparseable: {raw[:200]!r}"
 
 
+def judge_advisory(
+    question: str, answer: str, buckets: dict, feasible: bool, judge_llm: ChatOpenAI
+) -> tuple[bool, str, bool]:
+    """LLM-as-judge for GOAL-ORIENTED ADVISORY cases (see
+    JUDGE_ADVISORY_SYSTEM_PROMPT for the grading rules). Returns (correct,
+    reason, misuse_suggested). Never raises -- an unparseable judge response
+    is scored as incorrect with misuse_suggested left False (unproven, not
+    assumed) rather than crashing the run, same failure-handling convention
+    as judge_answer above.
+    """
+    user_msg = (
+        f"Question: {question}\n\n"
+        f"Ground-truth buckets for this scenario:\n{json.dumps(buckets, indent=2)}\n\n"
+        f"feasible: {feasible}\n\n"
+        f"Generated answer:\n{answer}"
+    )
+    try:
+        response = judge_llm.invoke(
+            [
+                {"role": "system", "content": JUDGE_ADVISORY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ]
+        )
+        raw = response.content.strip()
+    except Exception as e:  # network/API error -- don't crash the run over it
+        return False, f"judge call failed: {type(e).__name__}: {e}", False
+
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+
+    try:
+        parsed = json.loads(raw)
+        misuse_suggested = bool(parsed.get("misuse_suggested", False))
+        # The rubric already tells the judge to force correct=false whenever
+        # misuse_suggested is true, but that's enforced here too rather than
+        # trusted blindly -- an automatic fail must never depend solely on
+        # the judge having applied its own rule correctly.
+        correct = bool(parsed.get("correct", False)) and not misuse_suggested
+        return correct, str(parsed.get("reason", "")).strip(), misuse_suggested
+    except (json.JSONDecodeError, AttributeError):
+        return False, f"judge output unparseable: {raw[:200]!r}", False
+
+
 # --------------------------------------------------------------------------
 # Per-question evaluation
 # --------------------------------------------------------------------------
@@ -296,6 +386,10 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
             row["citation_recall_hit"] = False
             row["answer_correct"] = False
             row["judge_reason"] = "question errored before evaluation"
+        elif item["type"] == "advisory":
+            row["advisory_correct"] = False
+            row["misuse_suggested"] = False
+            row["advisory_reason"] = "question errored before evaluation"
         else:
             row["refusal_correct"] = False
         return row
@@ -344,6 +438,22 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
             # Needs a correctness verdict to classify -- undetermined without --judge.
             row["fact_retrieval_gap"] = ""
 
+    elif item["type"] == "advisory":
+        buckets = item.get("buckets", {})
+        feasible = item.get("feasible")
+
+        if judge_llm is not None:
+            correct, reason, misuse_suggested = judge_advisory(
+                item["question"], rag_result.answer, buckets, feasible, judge_llm
+            )
+            row["advisory_correct"] = correct
+            row["misuse_suggested"] = misuse_suggested
+            row["advisory_reason"] = reason
+        else:
+            row["advisory_correct"] = ""
+            row["misuse_suggested"] = ""
+            row["advisory_reason"] = "(judge not run -- pass --judge)"
+
     else:  # out_of_scope
         row["refusal_correct"] = rag_result.answer.strip() in _FALLBACK_RESPONSES
 
@@ -363,6 +473,7 @@ def _mean(values: list[float]) -> float | None:
 def compute_summary(rows: list[dict], judge_ran: bool) -> dict:
     in_scope = [r for r in rows if r["type"] == "in_scope"]
     out_scope = [r for r in rows if r["type"] == "out_of_scope"]
+    advisory = [r for r in rows if r["type"] == "advisory"]
 
     recall_at_k = _mean([1.0 if r["retrieval_hit"] else 0.0 for r in in_scope]) if in_scope else None
     mean_mrr = _mean([r["mrr"] for r in in_scope]) if in_scope else None
@@ -380,9 +491,26 @@ def compute_summary(rows: list[dict], judge_ran: bool) -> dict:
     refusal_accuracy = _mean([1.0 if r["refusal_correct"] else 0.0 for r in out_scope]) if out_scope else None
     hallucination_count = sum(1 for r in out_scope if not r["refusal_correct"])
 
+    # Advisory metrics are computed and reported separately from the block
+    # above -- additive, not folded into recall/MRR/citation/refusal, none
+    # of which apply to a goal-composition answer. misuse_suggestion_count
+    # is a raw count (not a rate) so it stays visible as an explicit 0, not
+    # an absent/None value, when nothing failed -- a silent gap here would
+    # read the same as "not measured."
+    if judge_ran and advisory:
+        judged_advisory = [r for r in advisory if r["advisory_correct"] != ""]
+        advisory_correctness_rate = (
+            _mean([1.0 if r["advisory_correct"] else 0.0 for r in judged_advisory]) if judged_advisory else None
+        )
+        misuse_suggestion_count = sum(1 for r in judged_advisory if r["misuse_suggested"] is True)
+    else:
+        advisory_correctness_rate = None
+        misuse_suggestion_count = None
+
     return {
         "num_in_scope": len(in_scope),
         "num_out_of_scope": len(out_scope),
+        "num_advisory": len(advisory),
         "k": K,
         "page_tolerance": PAGE_TOLERANCE,
         "judge_ran": judge_ran,
@@ -393,6 +521,8 @@ def compute_summary(rows: list[dict], judge_ran: bool) -> dict:
         "answer_correctness_rate": answer_correctness_rate,
         "refusal_accuracy": refusal_accuracy,
         "hallucination_count": hallucination_count,
+        "advisory_correctness_rate": advisory_correctness_rate,
+        "misuse_suggestion_count": misuse_suggestion_count,
     }
 
 
@@ -435,6 +565,15 @@ def print_table(rows: list[dict]) -> None:
             # True is the good outcome. PASS/FAIL would read backwards.
             gap_str = f"  fact_retrieval_gap={r['fact_retrieval_gap']}" if r["fact_retrieval_gap"] != "" else ""
             print(f"  answer_correct={_fmt(r['answer_correct'])}  ({r['judge_reason']}){gap_str}")
+        elif r["type"] == "advisory":
+            # misuse_suggested is printed raw, not through _fmt()'s PASS/FAIL
+            # bool mapping -- True is the BAD outcome here (same reasoning as
+            # fact_retrieval_gap above), and PASS/FAIL would read backwards.
+            misuse_str = r["misuse_suggested"] if r["misuse_suggested"] != "" else "-"
+            print(
+                f"  advisory_correct={_fmt(r['advisory_correct'])}  "
+                f"misuse_suggested={misuse_str}  ({r['advisory_reason']})"
+            )
         else:
             print(f"  refusal_correct={_fmt(r['refusal_correct'])}")
         print(f"  cited: {r['cited_sources'] or '(none)'}")
@@ -454,6 +593,24 @@ def print_summary(summary: dict) -> None:
         print("Answer correctness:      (skipped -- run with --judge)")
     print(f"Refusal accuracy:        {_fmt(summary['refusal_accuracy'])}")
     print(f"Hallucination count:     {summary['hallucination_count']} / {summary['num_out_of_scope']} out_of_scope questions")
+
+    # Kept as its own block, separate from the metrics above -- advisory is
+    # additive and scores a different thing (goal composition, not
+    # lookup/retrieval), so it isn't averaged into or substituted for any of
+    # the existing numbers.
+    print("\n=== Advisory (goal-oriented) summary ===")
+    print(f"Advisory questions:      {summary['num_advisory']}")
+    if not summary["num_advisory"]:
+        print("Advisory correctness:    (no advisory questions in this set)")
+        print("Misuse-suggestion count: (no advisory questions in this set)")
+    elif not summary["judge_ran"]:
+        print("Advisory correctness:    (skipped -- run with --judge)")
+        print("Misuse-suggestion count: (skipped -- run with --judge)")
+    else:
+        print(f"Advisory correctness:    {_fmt(summary['advisory_correctness_rate'])}")
+        # Always printed, including when it's 0 -- a clean 0 must be as
+        # visible as a nonzero count, not just surfaced on failure.
+        print(f"Misuse-suggestion count: {summary['misuse_suggestion_count']} / {summary['num_advisory']} advisory questions")
 
 
 def write_reports(rows: list[dict], summary: dict) -> None:

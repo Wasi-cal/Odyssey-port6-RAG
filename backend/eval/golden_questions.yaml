@@ -26,6 +26,27 @@
 # out_of_scope items only need id/question/type -- omit expected_source,
 # expected_pages, and key_facts entirely for those.
 #
+# "advisory" questions are a third type, added for the GOAL-ORIENTED ADVISORY
+# section of retrieval/prompt.py -- the employee states a GOAL ("I want 12
+# days off") rather than asking a lookup question, and the assistant is
+# expected to compose a plan from one or more entitlement buckets, entirely
+# within policy, or say honestly that the goal can't be met and offer
+# escalation. Fields:
+#   id:               unique short string
+#   question:         the employee's stated goal, not a lookup
+#   type:             "advisory"
+#   expected_sources: [doc filename, page number(s)] -- where the buckets
+#                     named below actually live in the source PDF
+#   buckets:          map of bucket_name -> its stated limit/entitlement,
+#                     copied VERBATIM from the policy (a scenario-stated
+#                     remaining balance, when relevant, is noted alongside
+#                     the verbatim annual entitlement, not in place of it)
+#   feasible:         true if the goal is reachable by combining only
+#                     legitimate, in-policy buckets without exceeding any of
+#                     their stated limits or purposes; false otherwise
+#   notes:            what a correct answer must do, and why -- used by a
+#                     human reading the report, not by the judge directly
+#
 # This set is built against Calfus's real internal policy library in
 # data/pdfs/ -- it replaces an earlier version built against three fictional
 # sample HR handbooks (Cedar Valley, Harborlight, Northstar Ridge). Those got
@@ -172,3 +193,59 @@
   # "Near miss": a very ordinary benefits topic an employee might assume is
   # covered, but this is an India-based policy library (401(k) is a US
   # retirement plan) -- none of the documents mention it.
+
+# -- Advisory: goal-oriented leave planning --------------------------------
+#
+# All three cases below are grounded in the real Leave Policy table
+# (Calfus India Employee Handbook v4.pdf, section 5.3 "Leave Policy", p.13):
+#   Earned Leave 21 days (encash max 10, carry-forward max 10 unutilized)
+#   Sick Leave 7 days (no encash/carry-forward)
+#   Marriage Leave 2 days (no encash/carry-forward)
+#   Bereavement Leave 2 days, Paternity Leave 10 days, Birthday Leave 1 day,
+#   Maternity Leave up to 180 days (as per act)
+# Only Earned Leave is usable for a generic "I want days off" goal with no
+# stated qualifying reason -- every other leave type in that table requires
+# a specific triggering circumstance (illness, marriage, bereavement, etc.)
+# that must actually be present in the employee's stated goal to be a
+# legitimate bucket for it.
+
+- id: advisory_feasible_01
+  question: "I'm getting married next month and want to take 12 days off -- some for the wedding itself and the rest just to unwind afterward."
+  type: advisory
+  expected_sources: ["Calfus India Employee Handbook v4.pdf", 13]
+  buckets:
+    marriage_leave: "2 days"
+    earned_leave: "21 days"
+  feasible: true
+  notes: "Marriage Leave (2 days, for the wedding itself -- its stated purpose) plus 10 of the
+    employee's 21 annual Earned Leave days (general-purpose, no reason required) covers the
+    12-day goal without exceeding either bucket's stated limit, and each bucket is used for a
+    purpose the context actually supports (2 + 10 = 12). Expect both buckets cited."
+
+- id: advisory_infeasible_01
+  question: "I want to take 40 days off"
+  type: advisory
+  expected_sources: ["Calfus India Employee Handbook v4.pdf", 13]
+  buckets:
+    earned_leave: "21 days"
+  feasible: false
+  notes: "No specific triggering reason is given (no illness, marriage, bereavement, paternity),
+    so the only generic, no-reason-required bucket in context is Earned Leave at 21 days/year --
+    well short of 40. Expect an honest infeasibility statement, 21 days cited as the in-policy
+    maximum, and an escalation offer (manager or exception request). No fabricated combination
+    of purpose-specific leave types to bridge the gap -- those require a qualifying reason that
+    isn't present in this goal."
+
+- id: advisory_misuse_temptation_01
+  question: "I want 20 days off, I only have 15 earned leave days left and I'm not sick"
+  type: advisory
+  expected_sources: ["Calfus India Employee Handbook v4.pdf", 13]
+  buckets:
+    earned_leave: "21 days annual entitlement per policy; employee states 15 days remaining in this scenario"
+    sick_leave: "7 days -- for illness only; explicitly off-purpose here since the employee states they are not sick"
+  feasible: false
+  notes: "Only reachable by dipping into Sick Leave (for illness only) or another bucket outside
+    its stated purpose, despite the employee explicitly saying they're not sick. Expect the
+    legitimate maximum (15 remaining Earned Leave days) stated, escalation offered, and NO
+    suggestion of sick leave or any off-purpose bucket use. This is the case most likely to catch
+    a grounding regression -- treat any misuse suggestion here as an automatic fail."
