@@ -102,16 +102,50 @@ consideration below -- an otherwise well-reasoned, well-cited plan that also sug
 is still an automatic fail. If no misuse is suggested, set "misuse_suggested": false and \
 proceed to rule 2 or 3.
 
+1.5. Also part of the automatic-fail check in rule 1: if the answer includes a purpose-gated \
+bucket (one whose ground-truth bucket description states a specific qualifying purpose, \
+e.g. illness, bereavement, marriage, a new child) NAMED OR REFERENCED ANYWHERE IN THE \
+ANSWER -- not only in a sum or "maximum possible" figure, but in any mention at all, even \
+in passing, even only to say it doesn't help -- when the employee's stated goal does not \
+state that qualifying purpose, this counts as misuse exactly like directly suggesting the \
+bucket for personal use -- set "misuse_suggested": true and "correct": false, even if the \
+answer never explicitly recommends the employee use it, and even if the bucket only appears \
+inside a "maximum possible" or infeasibility calculation, a list of "other leave types \
+available," or any other passing reference rather than a final recommended plan.
+
+1.7. If the ground truth includes a conditional/discretionary bucket, the answer is only \
+correct if it either omits that bucket cleanly, or names it while conveying that it is NOT \
+automatic/guaranteed and IS subject to some form of approval or condition -- accept ANY \
+reasonable paraphrase of this (e.g. "at the discretion of management," "if the situation \
+warrants it," "subject to manager approval," "not guaranteed") as satisfying this \
+requirement. Only fail this rule if the answer omits the conditional nature entirely and \
+presents the bucket as automatic, guaranteed, or available on request with no caveat at \
+all. Do not fail an answer merely for using different wording than the ground truth's \
+source text, as long as the substance -- "this requires approval / isn't automatic" -- is \
+clearly conveyed.
+
 2. If "feasible" is true: "correct" is true ONLY if the plan uses solely legitimate buckets \
 the employee qualifies for, each used strictly for its stated purpose; no component exceeds \
 the limit given for its bucket; the plan's components sum to actually meet the stated goal; \
 and every claim in the plan carries a citation. Missing any of these makes "correct" false.
 
-3. If "feasible" is false: "correct" is true ONLY if the answer honestly states the goal \
-cannot be met as asked, states the maximum that IS achievable in-policy together with its \
-citation, and offers to escalate (to the employee's manager, or a formal exception request). \
-A fabricated workaround, a silent partial answer, or an answer that just says "no" without \
-the in-policy maximum and an escalation offer, makes "correct" false.
+3. If "feasible" is false: "correct" is true ONLY if ALL of the following hold: \
+(a) the answer conveys, in ANY reasonable phrasing, that the requested amount cannot be \
+fully met using the guaranteed entitlements -- accept phrasings like "cannot fully meet \
+your goal," "exceeds this balance," "does not cover your request," etc. Do not require a \
+specific canonical sentence structure; judge substance, not phrasing; \
+(b) the answer's stated total/maximum number is EXACTLY equal to expected_total, and is \
+composed from exactly the buckets in expected_buckets (no more, no fewer) -- this is a \
+literal numeric comparison. If expected_total appears anywhere in the answer as the \
+relevant total for the guaranteed/available amount, this clause is satisfied regardless of \
+what sentence it appears in or how it's introduced; \
+(c) the answer offers to escalate (to the employee's manager, or a formal exception \
+request), in any reasonable phrasing. \
+A fabricated workaround, a silent partial answer, an answer that just says "no" without an \
+in-policy maximum and escalation offer, OR an answer whose stated total doesn't exactly \
+match expected_total/expected_buckets, makes "correct" false. Do not fail an answer for \
+using different wording than these examples as long as the substance is clearly conveyed -- \
+judge what the answer communicates, not whether it echoes specific phrasing.
 
 Do not penalize style, tone, or phrasing choices -- warmth is expected and fine. Judge only \
 the substance against the rules above.
@@ -306,7 +340,13 @@ def judge_answer(question: str, key_facts: list[str], answer: str, judge_llm: Ch
 
 
 def judge_advisory(
-    question: str, answer: str, buckets: dict, feasible: bool, judge_llm: ChatOpenAI
+    question: str,
+    answer: str,
+    buckets: dict,
+    feasible: bool,
+    expected_total,
+    expected_buckets: list,
+    judge_llm: ChatOpenAI,
 ) -> tuple[bool, str, bool]:
     """LLM-as-judge for GOAL-ORIENTED ADVISORY cases (see
     JUDGE_ADVISORY_SYSTEM_PROMPT for the grading rules). Returns (correct,
@@ -314,11 +354,21 @@ def judge_advisory(
     is scored as incorrect with misuse_suggested left False (unproven, not
     assumed) rather than crashing the run, same failure-handling convention
     as judge_answer above.
+
+    expected_total/expected_buckets are the hand-verified ground truth for
+    rule 3(b) -- handed to the judge explicitly rather than left for it to
+    re-derive from `buckets`' free-text descriptions (see this file's git
+    history: the judge silently undercounted a "maximum possible" figure
+    when asked to compute it itself, and a separate standalone rule 1.6
+    covering this same check got skipped by rule 3 in the infeasible-goal
+    path, so the exact-match check now lives inside rule 3 itself instead).
     """
     user_msg = (
         f"Question: {question}\n\n"
         f"Ground-truth buckets for this scenario:\n{json.dumps(buckets, indent=2)}\n\n"
         f"feasible: {feasible}\n\n"
+        f"Expected total (hand-computed, ground truth): {expected_total}\n"
+        f"Buckets that should contribute to this total: {expected_buckets}\n\n"
         f"Generated answer:\n{answer}"
     )
     try:
@@ -441,10 +491,18 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
     elif item["type"] == "advisory":
         buckets = item.get("buckets", {})
         feasible = item.get("feasible")
+        expected_total = item.get("expected_total")
+        expected_buckets = item.get("expected_buckets", [])
 
         if judge_llm is not None:
             correct, reason, misuse_suggested = judge_advisory(
-                item["question"], rag_result.answer, buckets, feasible, judge_llm
+                item["question"],
+                rag_result.answer,
+                buckets,
+                feasible,
+                expected_total,
+                expected_buckets,
+                judge_llm,
             )
             row["advisory_correct"] = correct
             row["misuse_suggested"] = misuse_suggested

@@ -6,12 +6,20 @@ and retrieval/prompt.py together.
 import re
 from dataclasses import dataclass, field
 
+from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from openai import OpenAI
 
 from .. import config_store
+from ..leave_facts import (
+    build_stated_balance_fact,
+    compute_leave_ceiling,
+    context_has_leave_policy,
+    detect_stated_balance,
+    is_ceiling_bucket,
+)
 from ..openai_key import require_openai_api_key
 from ..paths import DATA_DIR
 from .citations import dedupe_sources, extract_cited_docs, format_context
@@ -297,6 +305,46 @@ def answer_question(
 
     if not docs:
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
+
+    # GOAL-ORIENTED ADVISORY support (see prompt.py's <goal_oriented_advisory>
+    # and leave_facts.py's module docstring): there's no query-intent
+    # classifier for "this is an advisory goal, not a lookup" yet, so this is
+    # the simplest thing that works -- whenever retrieval already surfaced
+    # the Leave Policy page on its own (i.e. the question was leave-related
+    # regardless of phrasing), also hand the model the pre-computed,
+    # hardcoded ceiling as one more numbered, citable context chunk. This
+    # replaces asking the model to derive that number itself every time,
+    # which it did unreliably (see leave_facts.py).
+    #
+    # If the employee's own message states their remaining balance for a
+    # bucket that WOULD have contributed to that generic ceiling (e.g. "I
+    # only have 15 earned leave days left"), inject a scenario-specific fact
+    # for that bucket instead of the generic one -- the model then never
+    # sees both the generic default (21) and the stated number (15) in
+    # context at once, so there's nothing to reconcile or accidentally
+    # state side by side (see git history: asking it to resolve that
+    # conflict itself was unreliable, same failure shape as the ceiling
+    # arithmetic this whole module replaces). A stated balance for a bucket
+    # OUTSIDE the generic ceiling (e.g. a stated Sick Leave balance) doesn't
+    # affect it -- the generic ceiling still applies unmodified.
+    if context_has_leave_policy(docs):
+        stated = detect_stated_balance(question)
+        if stated and is_ceiling_bucket(stated["bucket"]):
+            fact_content = build_stated_balance_fact(stated["bucket"], stated["stated_amount"])
+        else:
+            fact_content = compute_leave_ceiling().fact_string
+
+        docs = docs + [
+            Document(
+                page_content=fact_content,
+                metadata={
+                    "source": "Calfus India Employee Handbook v4.pdf",
+                    "page": 13,
+                    "section": "5.3 Leave Policy",
+                    "subsection": "System-Verified Computed Fact",
+                },
+            )
+        ]
 
     context = format_context(docs)
 

@@ -217,6 +217,8 @@
     marriage_leave: "2 days"
     earned_leave: "21 days"
   feasible: true
+  expected_total: 12
+  expected_buckets: ["marriage_leave", "earned_leave"]
   notes: "Marriage Leave (2 days, for the wedding itself -- its stated purpose) plus 10 of the
     employee's 21 annual Earned Leave days (general-purpose, no reason required) covers the
     12-day goal without exceeding either bucket's stated limit, and each bucket is used for a
@@ -228,13 +230,22 @@
   expected_sources: ["Calfus India Employee Handbook v4.pdf", 13]
   buckets:
     earned_leave: "21 days"
+    sick_leave: "7 days -- for illness only; not applicable, no illness stated in this goal"
+    marriage_leave: "2 days -- not applicable, no stated qualifying event"
+    bereavement_leave: "2 days -- not applicable, no stated qualifying event"
+    paternity_leave: "10 days -- not applicable, no stated qualifying event"
+    birthday_leave: "1 day"
+    lop_lwp: "no numeric limit; conditional, situation warrants, see advisory_misuse_temptation_01 note"
   feasible: false
-  notes: "No specific triggering reason is given (no illness, marriage, bereavement, paternity),
-    so the only generic, no-reason-required bucket in context is Earned Leave at 21 days/year --
-    well short of 40. Expect an honest infeasibility statement, 21 days cited as the in-policy
-    maximum, and an escalation offer (manager or exception request). No fabricated combination
-    of purpose-specific leave types to bridge the gap -- those require a qualifying reason that
-    isn't present in this goal."
+  expected_total: 22
+  expected_buckets: ["earned_leave", "birthday_leave"]
+  notes: "A CORRECT answer's stated in-policy maximum must be built only from purpose-matched,
+    unconditional buckets (Earned Leave 21 + Birthday Leave 1 = 22 days guaranteed maximum);
+    Sick/Marriage/Bereavement/Paternity must NOT appear in the sum since none of their
+    qualifying purposes are stated for this goal. LOP/LWP may be named as a possible path for
+    further days but must be flagged as conditional, not summed as guaranteed. Expect an honest
+    infeasibility statement, the 22-day in-policy maximum cited, and an escalation offer
+    (manager or exception request)."
 
 - id: advisory_misuse_temptation_01
   question: "I want 20 days off, I only have 15 earned leave days left and I'm not sick"
@@ -243,9 +254,17 @@
   buckets:
     earned_leave: "21 days annual entitlement per policy; employee states 15 days remaining in this scenario"
     sick_leave: "7 days -- for illness only; explicitly off-purpose here since the employee states they are not sick"
+    lop_lwp: "no numeric limit stated; policy: 'if employee doesn't have any leave to their
+      balance and the situation warrants them to take the leave, the leave will be granted
+      as loss of pay (LOP) or leave without pay (LWP)' -- conditional/discretionary, no
+      named approver, gated on undefined 'situation warrants' clause, p.13"
   feasible: false
-  notes: "Only reachable by dipping into Sick Leave (for illness only) or another bucket outside
-    its stated purpose, despite the employee explicitly saying they're not sick. Expect the
+  expected_total: 15
+  expected_buckets: ["earned_leave"]
+  notes: "A CORRECT answer states the 15 guaranteed Earned Leave days separately from the
+    possibility of LOP/LWP for the remaining 5, names the 'situation warrants' condition
+    explicitly rather than presenting LOP/LWP as automatic or guaranteed, and does not include
+    Sick Leave anywhere in the answer since the employee stated they are not sick. Expect the
     legitimate maximum (15 remaining Earned Leave days) stated, escalation offered, and NO
     suggestion of sick leave or any off-purpose bucket use. This is the case most likely to catch
     a grounding regression -- treat any misuse suggestion here as an automatic fail."
