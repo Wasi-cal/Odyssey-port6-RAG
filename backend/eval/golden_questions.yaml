@@ -268,3 +268,284 @@
     legitimate maximum (15 remaining Earned Leave days) stated, escalation offered, and NO
     suggestion of sick leave or any off-purpose bucket use. This is the case most likely to catch
     a grounding regression -- treat any misuse suggestion here as an automatic fail."
+
+# -- Coverage-gap additions (d1-d28) -----------------------------------------
+#
+# Added from a full-corpus coverage-gap pass (see eval_coverage_gap_report.md
+# in project scratch notes) targeting categories the original q1-q13 set
+# didn't exercise: MULTI-PART, COMPARATIVE, CROSS-DOCUMENT, TABLE-DEPENDENT,
+# and NEAR-DUPLICATE DISAMBIGUATION (the last added after q6 and q2 both
+# independently reproduced the same near-identical-source-competing-for-
+# retrieval failure mode in production). Every fact below was hand-verified
+# against the actual PDF text, including HR Security Policy page numbers
+# re-derived from this pipeline's own extract_pages() output rather than the
+# PDF's printed footer or a raw page-reader index, which disagree with each
+# other and with what's actually stored in Chroma metadata for this document.
+
+# -- MULTI-PART -------------------------------------------------------------
+
+- id: d1
+  question: "How quickly must a POSH complaint go through conciliation and inquiry, and how much time does an employee have to appeal the final recommendations?"
+  type: in_scope
+  expected_source: "POSH Policy_2025 Ver2.0.pdf"
+  expected_pages: [14]
+  key_facts:
+    - "Conciliation process: 15 days from request"
+    - "Inquiry process: 90 days from receiving the complaint"
+    - "Appeal: 90 days from the date of recommendations"
+
+- id: d2
+  question: "What performance rating triggers a Performance Improvement Plan, and what's the minimum time an employee must be in a role before they can be promoted?"
+  type: in_scope
+  expected_source: "Performance Appraisal & Promotion Policy_Ver 1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "A rating of 1 or 2 (after averaging H1 and H2) triggers a PIP"
+    - "Minimum 18 months in the current role for promotion eligibility"
+
+- id: d3
+  question: "What is the CISO responsible for under the HR Security Policy, and how many days before a new hire joins must HR inform the IT Support team?"
+  type: in_scope
+  expected_source: "HR Security Policy-V1.0.pdf"
+  expected_pages: [11]
+  key_facts:
+    - "CISO oversees implementation of the HR Security Policy and approves any exception to policy"
+    - "HR must inform IT Support 5 days before joining and before the termination date"
+
+- id: d4
+  question: "What class of air travel are employees entitled to for business travel, and what's the reimbursement rate for breakfast?"
+  type: in_scope
+  expected_source: "Travel Policy_Ver1.0.pdf"
+  expected_pages: [2, 3]
+  key_facts:
+    - "Economy class for employees transferred to a new work location"
+    - "Breakfast reimbursed at Rs. 150"
+
+- id: d5
+  question: "What are the different channels for reporting an ethics concern versus a data security concern under the Whistleblower and Non-Retaliation Policy?"
+  type: in_scope
+  expected_source: "Whistleblower and Non-Retaliation Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Ethics-related concerns: ethics@calfus.com"
+    - "CISO or Data security related concerns: dpo@calfus.com"
+
+- id: d6
+  question: "Which types of communication require mandatory human oversight when AI assistance is used, and what's the consequence of leaking confidential data through a company communication channel?"
+  type: in_scope
+  expected_source: "Communication Policy_Ver1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Human oversight is mandatory for legal, compliance, contractual, medical, financial advice, or media/public statements"
+    - "Violations may result in corrective actions per Disciplinary policy, up to and including termination"
+
+# -- COMPARATIVE --------------------------------------------------------------
+
+- id: d7
+  question: "Under the HR Security Policy, at what stage does the disciplinary procedure start for a Misconduct/Frequent offender violation compared to an Information Security Violation?"
+  type: in_scope
+  expected_source: "HR Security Policy-V1.0.pdf"
+  expected_pages: [7]
+  key_facts:
+    - "Misconduct/Frequent offender: disciplinary procedure starts at stage 5"
+    - "Information Security Violations: disciplinary procedure starts at stage 6"
+
+- id: d8
+  question: "What's the difference in accommodation entitlement for an employee below grade 6 versus grade 6 and above during business travel?"
+  type: in_scope
+  expected_source: "Travel Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Below grade 6: twin sharing accommodation"
+    - "Grade 6 and above: single occupancy accommodation"
+
+- id: d9
+  question: "What are the eligibility cutoff dates for the H1 review cycle versus the H2/Annual review cycle under the Performance Appraisal Policy?"
+  type: in_scope
+  expected_source: "Performance Appraisal & Promotion Policy_Ver 1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "H1 review: must be confirmed on or before 30th June of the appraisal year"
+    - "H2/Annual review: must be confirmed on or before 31st December"
+
+- id: d10
+  question: "What's the difference between a Level 2 (Moderate Impact) and a Level 3 (High Impact) violation under the Disciplinary Policy?"
+  type: in_scope
+  expected_source: "Disciplinary Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Level 2: incidents that cause noticeable disruption or require corrective action but do not result in significant harm"
+    - "Level 3: incidents that substantially affect productivity, compliance, or workplace harmony and may involve serious breaches of policy"
+
+- id: d11
+  question: "How does the nomination timeline differ between Calfus Virtues in Action and the Quarterly Performance Awards (CLAP)?"
+  type: in_scope
+  expected_source: "Rewards and Recognition Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Virtues in Action: nominated 7 days before Calfus Connect"
+    - "Quarterly Awards: nominated in the last week of the quarter"
+
+# -- CROSS-DOCUMENT -----------------------------------------------------------
+
+- id: d12
+  question: "If I suspect a data breach or a phishing attempt, who should I report it to under the Remote Connectivity & Data Protection Policy?"
+  type: in_scope
+  expected_source: "Remote Connectivity & Data Protection Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Report immediately to the CISO/IT Team"
+
+- id: d13
+  question: "What might an employee be required to do after receiving certification reimbursement, and who decides the format?"
+  type: in_scope
+  expected_source: "Certification Reimbursement Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "May be required to conduct a knowledge-sharing or training session to cascade learnings"
+    - "Format and audience determined in consultation with the Reporting Manager and HR"
+
+- id: d14
+  question: "What happens after a low performance rating under the Performance Appraisal Policy, and which other policy governs the follow-up process?"
+  type: in_scope
+  expected_source: "Performance Appraisal & Promotion Policy_Ver 1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "A rating of 1 or 2 triggers a Performance Improvement Plan (PIP)"
+    - "Refer to the PIP Policy for more details"
+
+- id: d15
+  question: "How are POSH-related concerns handled under the Whistleblower and Non-Retaliation Policy?"
+  type: in_scope
+  expected_source: "Whistleblower and Non-Retaliation Policy_Ver1.0.pdf"
+  expected_pages: [2]
+  key_facts:
+    - "Harassment/discrimination concerns are POSH matters"
+    - "POSH matters are handled by the Internal Committee"
+
+- id: d16
+  question: "Where can an employee find the anonymous reporting channel referenced in the HR Security Policy's whistleblower section?"
+  type: in_scope
+  expected_source: "HR Security Policy-V1.0.pdf"
+  expected_pages: [10]
+  key_facts:
+    - "Whistleblower Anonymous Channel: please refer to the Whistleblower Policy"
+    - "Direct reporting is also available to Human Resources"
+
+# -- TABLE-DEPENDENT -----------------------------------------------------------
+
+- id: d17
+  question: "How quickly must a POSH complaint be acknowledged after it's received, and how fast must an interim relief request be addressed?"
+  type: in_scope
+  expected_source: "POSH Policy_2025 Ver2.0.pdf"
+  expected_pages: [14]
+  key_facts:
+    - "Acknowledgement of complaint: within 7 days of receipt"
+    - "Interim relief request: within 7 days of the request"
+
+- id: d18
+  question: "What's the reimbursement rate for breakfast versus lunch/dinner during business travel?"
+  type: in_scope
+  expected_source: "Travel Policy_Ver1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Breakfast: Rs. 150"
+    - "Lunch/Dinner: Rs. 300"
+
+- id: d19
+  question: "What are the IT team's responsibilities under the HR Security Policy's Roles and Responsibilities table?"
+  type: in_scope
+  expected_source: "HR Security Policy-V1.0.pdf"
+  expected_pages: [11]
+  key_facts:
+    - "Collaborate with HR on phishing campaigns and annual awareness training"
+    - "Access provisioning is done based on the roles defined in the on-boarding form"
+
+- id: d20
+  question: "According to the Employee Handbook's referral payout matrix, what's the referral bonus for a candidate with 6 to 8 years of experience, and how long is the probationary period before it's paid out?"
+  type: in_scope
+  expected_source: "Calfus India Employee Handbook v4.pdf"
+  expected_pages: [16]
+  key_facts:
+    - "INR 70,000 for a candidate with 6 to 8 years of experience"
+    - "Paid after a 90-day probationary period"
+
+- id: d21
+  question: "What are the two responsibilities listed for Employees in the HR Security Policy's Roles and Responsibilities table?"
+  type: in_scope
+  expected_source: "HR Security Policy-V1.0.pdf"
+  expected_pages: [11]
+  key_facts:
+    - "Follow the HR Security Policy"
+    - "Report any incidents promptly through the defined reporting channel"
+
+# -- NEAR-DUPLICATE DISAMBIGUATION ---------------------------------------------
+# These target the confirmed, twice-reproduced production failure mode where
+# near-identical "Exception to Policy" wording across many documents (or
+# near-identical content across the two Referral Policy PDFs) makes it hard
+# for embedding retrieval to land on the ONE correct source. Each question
+# below names its specific policy explicitly so there is exactly one correct
+# ground truth, even though a near-identical sentence exists elsewhere.
+
+- id: d22
+  question: "Under the Communication Policy specifically, who must approve an exception, and does that require consulting HR?"
+  type: in_scope
+  expected_source: "Communication Policy_Ver1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Requires prior written approval from the India Head"
+    - "In consultation with HR"
+
+- id: d23
+  question: "Under the Travel Policy specifically, who must approve a deviation, and does that require consulting HR?"
+  type: in_scope
+  expected_source: "Travel Policy_Ver1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Requires approval from the India Head"
+    - "No HR consultation is mentioned"
+
+- id: d24
+  question: "Under the standalone Employee Referral Policy (not the Employee Handbook), who approves an exception to the policy?"
+  type: in_scope
+  expected_source: "Calfus Crew - Employee Referral Policy_1.2.pdf"
+  expected_pages: [4]
+  key_facts:
+    - "Requires an approval of the India Head"
+    - "No HR consultation is mentioned"
+
+- id: d25
+  question: "Under the Performance Appraisal & Promotion Policy specifically, who must approve a deviation, and does that require consulting HR?"
+  type: in_scope
+  expected_source: "Performance Appraisal & Promotion Policy_Ver 1.0.pdf"
+  expected_pages: [4]
+  key_facts:
+    - "Requires prior written approval from the India Head"
+    - "In consultation with HR"
+
+- id: d26
+  question: "What referral eligibility rule exists only in the newer version of the Employee Referral Policy (the _1.2 file), and not in the original?"
+  type: in_scope
+  expected_source: "Calfus Crew - Employee Referral Policy_1.2.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Candidates whose primary professional background consists of CA Articleship"
+    - "Considered Intern/Fresher equivalents within the ERP Functional domain"
+
+- id: d27
+  question: "Under the Remote Connectivity & Data Protection Policy specifically, who must approve an exception, and does that require consulting HR?"
+  type: in_scope
+  expected_source: "Remote Connectivity & Data Protection Policy_Ver1.0.pdf"
+  expected_pages: [3]
+  key_facts:
+    - "Requires prior written approval from the India Head"
+    - "In consultation with HR"
+
+- id: d28
+  question: "Under the PIP Process specifically, who must approve a deviation from the policy?"
+  type: in_scope
+  expected_source: "PIP Process_Ver1.0.pdf"
+  expected_pages: [4]
+  key_facts:
+    - "Requires approval from the India Head"
+    - "No HR consultation is mentioned"

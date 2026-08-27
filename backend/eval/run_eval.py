@@ -37,6 +37,14 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from langchain_openai import ChatOpenAI  # noqa: E402  (after sys.path insert)
 
+# Imported directly from qa.py, not re-exported through rag.py -- this is the
+# exact same conservative document-name detector answer_question() itself
+# uses to decide whether to filter retrieval (see qa.py). Reusing it here
+# (rather than reimplementing or guessing at its behavior) is what keeps this
+# file's retrieval_hit/rank/MRR measurement honest about what's actually
+# served -- see the call site in evaluate_question() below.
+from assistant.retrieval.qa import _detect_named_document  # noqa: E402
+
 from rag import (  # noqa: E402
     K,
     FALLBACK_GIBBERISH,
@@ -287,9 +295,98 @@ def _normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower())
 
 
-def score_fact_presence(docs, key_facts: list[str]) -> int:
-    """Case-insensitive, whitespace-normalized substring check: was each
-    key_fact actually present somewhere in the retrieved chunk text?
+JUDGE_FACT_PRESENCE_SYSTEM_PROMPT = """You are a strict grading assistant checking whether a \
+piece of retrieved document context actually supports a specific fact -- regardless of exact \
+wording. You will be given one key fact (the ground truth, possibly paraphrased from the source \
+document) and the full retrieved context (numbered chunks from a RAG system).
+
+First, break the key_fact down into its distinct components -- e.g. an amount AND a condition, \
+an approver AND an additional requirement. A fact with only one distinct claim has exactly one \
+component; do not invent extra components that aren't really there.
+
+Then, for EACH component separately, decide whether the retrieved context actually states or \
+directly supports it, under any reasonable paraphrase (exact wording does not need to match). \
+Only mark a component supported if the context genuinely contains that specific piece of \
+information -- not merely a related or partial statement.
+
+List every component and its individual verdict BEFORE reaching any overall conclusion -- do \
+this decomposition explicitly, don't skip straight to a single yes/no judgment.
+
+Respond with ONLY a JSON object and nothing else, no markdown fences, in exactly this shape:
+{
+  "components": [
+    {"component": "<short description of this part of the fact>", "supported": true or false,
+     "evidence_or_gap": "<what the context says, or 'not found'>"},
+    ...
+  ],
+  "present": true or false
+}
+The "present" field should reflect your own component-by-component analysis: true only if \
+every component above is supported."""
+
+
+def judge_fact_presence(key_fact: str, context_text: str, judge_llm: ChatOpenAI) -> bool:
+    """LLM-as-judge for a single key_fact against retrieved context (not the
+    generated answer -- this checks retrieval, not generation). Forces
+    structured, per-component JSON output rather than a free-text verdict:
+    an earlier free-text version of this prompt let the model summarize past
+    a genuinely missing sub-clause (e.g. crediting "requires approval from
+    the India Head, in consultation with HR" as fully present because the
+    approval clause was there, even though "in consultation with HR" was
+    not) -- forcing the components to be listed as discrete JSON entries
+    before any verdict closed that gap in validation testing.
+
+    Returns a bool computed MECHANICALLY from the components list (present
+    only if every listed component is supported=true), never trusting the
+    model's own top-level "present" field directly -- that field is asked
+    for so the model has to commit to a conclusion, but the actual return
+    value here is always independently recomputed from the components it
+    listed, as a safety net against the two disagreeing.
+
+    Never raises -- an unparseable or errored judge response is scored as
+    absent (present=False), same fail-safe convention as judge_answer/
+    judge_advisory above.
+    """
+    user_msg = f"Key fact:\n{key_fact}\n\nRetrieved context:\n{context_text}"
+    try:
+        response = judge_llm.invoke(
+            [
+                {"role": "system", "content": JUDGE_FACT_PRESENCE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ]
+        )
+        raw = response.content.strip()
+    except Exception:  # network/API error -- don't crash the run over it
+        return False
+
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+
+    try:
+        parsed = json.loads(raw)
+        components = parsed.get("components", [])
+        # Mechanically computed, not parsed.get("present", False) -- see
+        # docstring above for why the model's own top-level field is never
+        # trusted directly. An empty components list (malformed output) is
+        # never present=True.
+        return bool(components) and all(bool(c.get("supported", False)) for c in components)
+    except (json.JSONDecodeError, AttributeError):
+        return False
+
+
+def score_fact_presence(docs, key_facts: list[str], judge_llm: ChatOpenAI | None = None) -> int:
+    """Was each key_fact actually present somewhere in the retrieved chunk
+    text? judge_llm=None (no --judge) falls back to the original
+    case-insensitive, whitespace-normalized substring check -- zero-cost,
+    same as before, so a plain `uv run eval/run_eval.py` without --judge is
+    unaffected. With --judge, each key_fact is checked via
+    judge_fact_presence() instead, which correctly handles a golden
+    key_fact that paraphrases the source PDF's actual wording (the
+    substring check's false-negative failure mode -- see this file's git
+    history for the diagnosis) without over-crediting a compound fact whose
+    components are only partially supported.
 
     This is the diagnostic that separates a CHUNKING/RETRIEVAL failure from a
     GENERATION failure: if a key_fact never made it into the context handed
@@ -298,8 +395,11 @@ def score_fact_presence(docs, key_facts: list[str]) -> int:
     every key_fact WAS in context and the judge still marked the answer
     incorrect, that's on generation/the prompt.
     """
-    context_text = _normalize_ws(" ".join(doc.page_content for doc in docs))
-    return sum(1 for fact in key_facts if _normalize_ws(fact) in context_text)
+    if judge_llm is None:
+        context_text = _normalize_ws(" ".join(doc.page_content for doc in docs))
+        return sum(1 for fact in key_facts if _normalize_ws(fact) in context_text)
+    context_text = "\n\n".join(doc.page_content for doc in docs)
+    return sum(1 for fact in key_facts if judge_fact_presence(fact, context_text, judge_llm))
 
 
 def judge_answer(question: str, key_facts: list[str], answer: str, judge_llm: ChatOpenAI) -> tuple[bool, str]:
@@ -423,10 +523,20 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
         # generated answer + its deduped citation list. answer_question()'s
         # own RagResult.sources is re-sorted alphabetically by rag.py (for
         # display), which destroys the rank order MRR needs, so it can't be
-        # reused for that -- hence the separate get_retriever() call. Both
-        # calls are deterministic (temperature=0, same embeddings), so they
-        # see identical retrieval results.
-        docs = get_retriever().invoke(item["question"])
+        # reused for that -- hence the separate get_retriever() call.
+        #
+        # named_document mirrors EXACTLY what answer_question() itself
+        # decides internally (same _detect_named_document() call) -- without
+        # this, a named-document question (e.g. "Under the Communication
+        # Policy specifically...") would score retrieval_hit/rank/MRR against
+        # an unfiltered call that answer_question() no longer actually makes,
+        # understating retrieval quality for exactly the questions this
+        # filter was built to help. Both calls are deterministic
+        # (temperature=0, same embeddings, same filter), so they see
+        # identical retrieval results again, same as before this filter
+        # existed.
+        named_document = _detect_named_document(item["question"])
+        docs = get_retriever(where={"source": named_document} if named_document else None).invoke(item["question"])
         rag_result = answer_question(item["question"])
     except Exception as e:
         row["error"] = f"{type(e).__name__}: {e}"
@@ -466,10 +576,12 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
         row["num_cited"] = num_cited
         row["num_relevant_cited"] = num_relevant
 
-        # facts_in_context is retrieval-only (no judge needed) -- computed
-        # regardless of --judge, since it's just a substring check against
-        # what was actually retrieved.
-        facts_in_context = score_fact_presence(docs, key_facts)
+        # facts_in_context is retrieval-only in the sense that it never looks
+        # at the generated answer -- but with --judge it now DOES make LLM
+        # calls (one per key_fact) to check retrieved context, no longer the
+        # zero-cost substring check it used to be. Without --judge, it's
+        # still the original free substring check (judge_llm=None).
+        facts_in_context = score_fact_presence(docs, key_facts, judge_llm)
         row["facts_in_context"] = facts_in_context
         row["num_key_facts"] = len(key_facts)
 
@@ -706,6 +818,13 @@ def main() -> None:
         default=str(Path(__file__).parent / "golden_questions.yaml"),
         help="Path to the golden question set YAML (default: eval/golden_questions.yaml).",
     )
+    parser.add_argument(
+        "--id",
+        default=None,
+        help="Run only the question with this id (e.g. --id q6). Useful for isolated "
+        "debugging/repro without paying for a full-suite run. Does not affect behavior "
+        "when omitted.",
+    )
     args = parser.parse_args()
 
     # This is a report, not a gate (per spec: exit code 0 always) -- so on a
@@ -729,6 +848,11 @@ def main() -> None:
         )
 
     questions = load_questions(args.questions)
+    if args.id is not None:
+        questions = [q for q in questions if q["id"] == args.id]
+        if not questions:
+            print(f"No question with id {args.id!r} found in {args.questions}.", file=sys.stderr)
+            return
     if not questions:
         print(f"No usable questions found in {args.questions} -- nothing to evaluate. See eval/README.md.")
         write_reports([], compute_summary([], args.judge))
@@ -737,7 +861,7 @@ def main() -> None:
     # temperature=0 + a fixed JUDGE_MODEL: see the determinism comment above
     # JUDGE_MODEL's definition -- this is what makes verdicts reproducible
     # run-to-run for the same pipeline output.
-    judge_llm = ChatOpenAI(model=JUDGE_MODEL, temperature=0) if args.judge else None
+    judge_llm = ChatOpenAI(model=JUDGE_MODEL, temperature=0, seed=42) if args.judge else None
     if args.judge:
         print(f"Running with --judge: answer correctness will be scored by {JUDGE_MODEL} (extra API calls).")
 

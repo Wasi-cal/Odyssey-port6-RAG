@@ -199,6 +199,70 @@ def _is_list_documents_question(question: str) -> bool:
     return any(phrase in q for phrase in _LIST_DOCUMENTS_PHRASES)
 
 
+# Deliberately conservative, filename-driven document-name detection -- NOT
+# an LLM classification (same reasoning as _is_list_documents_question
+# above: this needs to be cheap and predictable, not a judgment call). The
+# canonical document list is read fresh from DATA_DIR (the same source
+# _list_documents_answer() already uses), never a separately maintained
+# list, so it can't drift out of sync with what's actually ingested.
+#
+# A filename is reduced to its "core" (extension, version tokens like
+# "Ver1.0"/"v4"/a bare year/a bare decimal version, and the company name
+# "Calfus" all stripped) and only fires when that core phrase appears as a
+# whole, contiguous, word-bounded run of text in the question -- e.g.
+# "Communication Policy_Ver1.0.pdf" -> "communication policy", matched
+# against "Under the Communication Policy specifically...". This is
+# deliberately narrow: a question naming a document colloquially (e.g. "the
+# Performance Appraisal Policy" when the real file is "...& Promotion
+# Policy") or naming two documents at once (e.g. "the standalone Employee
+# Referral Policy (not the Employee Handbook)", which superficially matches
+# "employee handbook" too via the word "Handbook") won't fire -- multiple or
+# zero matches both fall back to today's unfiltered retrieval unchanged,
+# per the explicit "if ambiguous, don't filter" requirement this was built
+# against. False negatives (a real single-document question that doesn't
+# get detected) are an accepted tradeoff for never risking a false positive
+# that would wrongly exclude a document a cross-document question actually
+# needs.
+_VER_TOKEN_RE = re.compile(r"\bver\.?\s*\d+(?:\.\d+)*\b")
+_BARE_V_VERSION_RE = re.compile(r"\bv\d+(?:\.\d+)*\b")
+_BARE_YEAR_RE = re.compile(r"\b\d{4}\b")
+_BARE_DECIMAL_VERSION_RE = re.compile(r"\b\d+\.\d+\b")
+_CALFUS_RE = re.compile(r"\bcalfus\b")
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_doc_name(text: str) -> str:
+    text = text.lower()
+    if text.endswith(".pdf"):
+        text = text[:-4]
+    text = text.replace("&", " and ")
+    text = text.replace("-", " ").replace("_", " ")
+    text = _VER_TOKEN_RE.sub(" ", text)
+    text = _BARE_V_VERSION_RE.sub(" ", text)
+    text = _BARE_YEAR_RE.sub(" ", text)
+    text = _BARE_DECIMAL_VERSION_RE.sub(" ", text)
+    text = _CALFUS_RE.sub(" ", text)
+    text = _NON_ALNUM_RE.sub(" ", text)
+    return " ".join(text.split())
+
+
+def _detect_named_document(question: str) -> str | None:
+    """Returns the filename of the ONE document the question confidently,
+    unambiguously names, or None if it names zero or more than one --
+    None means "use today's existing unfiltered retrieval," never a guess.
+    """
+    normalized_question = _normalize_doc_name(question)
+    if not normalized_question:
+        return None
+    filenames = sorted(p.name for p in DATA_DIR.glob("*.pdf"))
+    matches = [
+        filename
+        for filename in filenames
+        if (core := _normalize_doc_name(filename)) and re.search(rf"\b{re.escape(core)}\b", normalized_question)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _is_abusive(question: str) -> bool:
     """OpenAI's Moderation API, not the generation model's own judgment --
     a purpose-built, separately-trained classifier for harassment/hate/
@@ -300,7 +364,14 @@ def answer_question(
 
     history_messages = _build_history_messages(chat_history)
 
-    retriever = get_retriever()
+    # If the question confidently, unambiguously names one specific document
+    # (see _detect_named_document), constrain retrieval to that document's
+    # chunks only via a Chroma metadata filter on "source" -- the same field
+    # every chunk's citation/dedup logic already keys off (citations.py).
+    # None (no confident single match) falls through to unfiltered retrieval,
+    # identical to today's behavior.
+    named_document = _detect_named_document(question)
+    retriever = get_retriever(where={"source": named_document} if named_document else None)
     docs = retriever.invoke(question)
 
     if not docs:
@@ -348,7 +419,7 @@ def answer_question(
 
     context = format_context(docs)
 
-    llm = ChatOpenAI(model=generation_model, temperature=generation_temperature)
+    llm = ChatOpenAI(model=generation_model, temperature=generation_temperature, seed=42)
     # INJECTION_DEFENSE_PREAMBLE always goes first, ahead of the
     # config-editable system_prompt -- see prompt.py's docstring for why
     # it's a separate, non-editable constant rather than folded into

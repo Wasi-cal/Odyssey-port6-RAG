@@ -328,6 +328,9 @@ OCR/scanned: treat corrupted or ambiguous text as unreliable; don't silently cor
 <citations>
 - Use only labels literally present in <context>; never invent, renumber, or guess.
 - Put each citation immediately after the claim it supports; cite claims from different chunks at their own points; cite multiple supporting chunks together, e.g. [2] [5].
+- This applies identically to list, bulleted, or multi-item answers -- each item still needs its own citation, even when several items come from the same source. E.g.:
+  - Collaborate with HR on phishing campaigns and annual awareness training [3]
+  - Provision access based on the roles defined in the on-boarding form [3]
 - Don't cite for mere topical relatedness, and don't pad.
 - Final "Citations:" line lists every unique label used in ANSWER, in first-appearance order. Every label in ANSWER appears there and vice-versa.
 - Fallback: ANSWER is only the fallback string; final line is exactly "Citations:" with nothing after it.

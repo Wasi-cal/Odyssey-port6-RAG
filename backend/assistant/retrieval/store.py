@@ -39,17 +39,26 @@ def _get_store() -> Chroma:
     )
 
 
-def get_retriever(k: int | None = None):
+def get_retriever(k: int | None = None, where: dict | None = None):
     """k/search_type come from config_store (live, Postgres-backed via
     Redis) on every call, falling back to this module's K/SEARCH_TYPE
     constants if the config subsystem is unreachable -- same live-reload
     contract as retrieval/qa.py's generation settings.
+
+    where, when given, is a Chroma metadata filter (e.g. {"source":
+    "Travel Policy_Ver1.0.pdf"}) passed through as langchain_chroma's
+    `filter` search kwarg -- see retrieval/qa.py's _detect_named_document
+    for the one caller that populates this today. None (the default)
+    preserves today's unfiltered, whole-corpus similarity search exactly.
     """
     if k is None:
         k = config_store.get("retrieval", "k", K)
     search_type = config_store.get("retrieval", "search_type", SEARCH_TYPE)
     store = _get_store()
-    return store.as_retriever(search_type=search_type, search_kwargs={"k": k})
+    search_kwargs = {"k": k}
+    if where:
+        search_kwargs["filter"] = where
+    return store.as_retriever(search_type=search_type, search_kwargs=search_kwargs)
 
 
 def store_is_empty() -> bool:
