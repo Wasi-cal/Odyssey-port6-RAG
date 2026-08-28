@@ -34,7 +34,7 @@ from assistant.retrieval.prompt import (
     GENERATION_TEMPERATURE,
     SYSTEM_PROMPT,
 )
-from assistant.retrieval.qa import RagResult, answer_question
+from assistant.retrieval.qa import RagResult, answer_question, answer_question_voice
 from assistant.retrieval.store import get_retriever, store_is_empty
 
 __all__ = [
@@ -51,6 +51,7 @@ __all__ = [
     "FALLBACK_ABUSE",
     "SYSTEM_PROMPT",
     "RagResult",
+    "answer_question_voice",
     "get_retriever",
     "store_is_empty",
     "format_citation",

@@ -83,7 +83,7 @@ def seed_defaults() -> None:
     never overwrites a value an admin has since edited directly in Postgres,
     so it's safe to call unconditionally on every app startup.
     """
-    from .retrieval.config import K, SEARCH_TYPE
+    from .retrieval.config import SEARCH_TYPE
     from .retrieval.prompt import (
         FALLBACK_ABUSE,
         FALLBACK_DANGEROUS,
@@ -191,7 +191,19 @@ def seed_defaults() -> None:
             {
                 "category": "retrieval",
                 "key": "k",
-                "value": K,
+                # 15, not the module constant K (still 10 -- see
+                # retrieval/config.py, kept as the fallback used only if the
+                # config subsystem itself is unreachable). Bumped from 10
+                # when switching embed_provider to "local" below: the local
+                # (bge-large) embedding space ranks some correct-but-
+                # narrowly-worded chunks just outside a k=10 MMR window
+                # (confirmed via direct rank inspection -- see git history/
+                # PR description) where OpenAI's embeddings keep them
+                # inside it. k=15 recovered full parity with the OpenAI
+                # baseline on the 44-question eval (answer correctness
+                # 0.82 both ways) with no measurable retrieval-latency cost
+                # and no new regressions across the other 41 questions.
+                "value": 15,
                 "description": "Number of chunks retrieved per question.",
             },
             {
@@ -259,6 +271,37 @@ def seed_defaults() -> None:
                 "description": (
                     "OpenAI embedding model (assistant/embeddings.py). Changing this only affects "
                     "newly-ingested documents -- existing Chroma vectors need a full re-ingest to match."
+                ),
+            },
+            {
+                "category": "embeddings",
+                "key": "embed_provider",
+                # Switched to "local" (bge-large-en-v1.5, see embeddings.py)
+                # after a 44-question --judge A/B eval showed full parity
+                # with the OpenAI provider at k=15 (retrieval.k above),
+                # plus a ~20-55x lower retrieval latency (no per-query
+                # OpenAI API round trip). "openai" and its collection
+                # (paths.COLLECTION_NAME) are left fully in place and
+                # selectable -- reverting is this one value going back to
+                # "openai", not a re-ingest or a code change.
+                "value": "local",
+                "description": (
+                    "Which embedding backend assistant/embeddings.py's get_embeddings() uses: "
+                    "'openai' (default, text-embedding-3-small, hosted) or 'local' (e.g. "
+                    "BAAI/bge-large-en-v1.5, runs on this machine via sentence-transformers, no "
+                    "external API call). Each provider reads/writes its own separate Chroma "
+                    "collection (see resolve_collection_name) -- switching this requires a full "
+                    "re-ingest into that provider's collection before it has anything to serve."
+                ),
+            },
+            {
+                "category": "embeddings",
+                "key": "local_embed_model_name",
+                "value": "BAAI/bge-large-en-v1.5",
+                "description": (
+                    "Hugging Face model id used when embed_provider is 'local' "
+                    "(assistant/embeddings.py). Changing this only affects newly-ingested "
+                    "documents, same as embed_model_name for the OpenAI provider."
                 ),
             },
         ]

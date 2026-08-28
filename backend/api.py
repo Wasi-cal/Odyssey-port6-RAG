@@ -46,7 +46,7 @@ from assistant.orchestration.config import TASK_QUEUE
 from assistant.orchestration.workflows.ingestion_workflow import IngestDocumentsWorkflow
 from assistant.retrieval.store import count_embeddings
 from ingest import DATA_DIR
-from rag import answer_question, format_citation
+from rag import answer_question, answer_question_voice, format_citation
 
 _DATA_DIR_RESOLVED = DATA_DIR.resolve()
 # Uploads wait here (not DATA_DIR) until an admin approves them -- a sibling
@@ -231,6 +231,18 @@ class AskResponse(BaseModel):
     num_chunks: int
     latency_ms: float
     title: str | None = None  # the session's current title, possibly just updated by this call -- None only if nothing changed and there wasn't one already
+
+
+class VoiceAskRequest(BaseModel):
+    question: str
+    session_id: str
+
+
+class VoiceAskResponse(BaseModel):
+    answer: str  # short, spoken-style text (see qa.answer_question_voice) -- meant to be spoken aloud by the realtime voice model
+    sources: list[SourceInfo]  # citation data for on-screen display only -- never spoken (see prompt.py's <voice_response_style>)
+    num_chunks: int
+    latency_ms: float
 
 
 class UploadResponse(BaseModel):
@@ -744,6 +756,80 @@ def ask(payload: AskRequest, user_id: str = Depends(get_current_user)) -> AskRes
         num_chunks=result.num_chunks_retrieved,
         latency_ms=latency_ms,
         title=new_title,
+    )
+
+
+@app.post("/voice/ask", response_model=VoiceAskResponse)
+def voice_ask(payload: VoiceAskRequest, user_id: str = Depends(get_current_user)) -> VoiceAskResponse:
+    """Voice counterpart to POST /ask -- calls qa.answer_question_voice()
+    instead of answer_question(), so the realtime voice model's
+    search_policies tool call gets a short, spoken-style answer
+    (VOICE_SYSTEM_PROMPT, k=6 -- see qa.py) instead of the text chat's
+    fuller one. Fully additive: does not modify /ask above, SYSTEM_PROMPT,
+    or retrieval.k's config-driven default (15) that /ask still uses.
+
+    Same auth and session-ownership check as /ask, and the same chat_history/
+    message-persistence wiring, so a voice turn and a text turn sharing one
+    session_id see each other's prior turns. One thing deliberately NOT
+    mirrored from /ask: session-title writeback. answer_question_voice()
+    always treats previous_title as unset (it has no titled-session concept
+    -- see its docstring), so writing its title back here would repeatedly
+    overwrite whatever title the text path already established for a shared
+    session; this endpoint leaves the session's title alone entirely.
+    """
+    question = (payload.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question must not be empty.")
+
+    owner = db.get_session_owner(payload.session_id)
+    if owner is not None and owner != user_id:
+        # Same "not yours" / "doesn't exist" ambiguity as /ask -- see its comment.
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    # Fetched BEFORE add_message below, same ordering as /ask, so this is
+    # every PRIOR message (voice or text) in the session.
+    chat_history = db.get_messages(payload.session_id)
+    db.add_message(payload.session_id, "user", question, None)
+
+    start = time.perf_counter()
+    try:
+        result = answer_question_voice(question, chat_history=chat_history)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    latency_ms = (time.perf_counter() - start) * 1000
+
+    formatted_sources = [
+        SourceInfo(
+            label=format_citation(s),
+            filename=s["source"],
+            page=s["page"] if isinstance(s["page"], int) else None,
+        )
+        for s in result.sources
+    ]
+    raw_source_filenames = [s["source"] for s in result.sources]
+
+    _log_query(question, result.num_chunks_retrieved, latency_ms, raw_source_filenames)
+    if result.total_tokens is not None:
+        try:
+            cost = pricing.chat_cost_usd(result.prompt_tokens or 0, result.completion_tokens or 0)
+            db.log_token_usage(
+                "chat", result.model, result.prompt_tokens, result.completion_tokens, result.total_tokens, cost
+            )
+        except Exception:
+            pass  # best-effort, matching _log_query -- never break /voice/ask over logging
+
+    meta = {
+        "sources": [s.model_dump() for s in formatted_sources],
+        "num_chunks": result.num_chunks_retrieved,
+        "latency_ms": latency_ms,
+    }
+    db.add_message(payload.session_id, "assistant", result.answer, meta)
+
+    return VoiceAskResponse(
+        answer=result.answer,
+        sources=formatted_sources,
+        num_chunks=result.num_chunks_retrieved,
+        latency_ms=latency_ms,
     )
 
 

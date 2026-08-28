@@ -67,11 +67,20 @@ def load_and_split(pdf_paths: list[Path]) -> list[Document]:
     return all_chunks
 
 
-def ingest_files(pdf_paths: list[Path]) -> tuple[int, int]:
+def ingest_files(pdf_paths: list[Path], provider: str | None = None) -> tuple[int, int]:
     """Embed and persist the given PDFs into Chroma. Returns
     (chunk_count, embed_tokens) -- embed_tokens is an estimate (see
     embeddings.count_tokens) of how many tokens were sent to the embedding
-    model, for the admin monitoring dashboard's cost figures.
+    model, for the admin monitoring dashboard's cost figures (meaningful for
+    the OpenAI provider only -- the local provider has no per-token cost).
+
+    `provider` overrides config_store's embeddings/embed_provider (see
+    embeddings.py), routing this ingest into that provider's OWN Chroma
+    collection (get_vector_store(provider)) -- e.g. "local" re-ingests the
+    same PDFs through the local embedding model into
+    paths.LOCAL_COLLECTION_NAME, side by side with (never overwriting) the
+    OpenAI-embedded collection. Omit it for today's config-driven default
+    ("openai"), unchanged.
 
     Idempotent per filename: clears any existing chunks for each of these
     exact filenames before adding the fresh ones, so calling this twice for
@@ -92,15 +101,15 @@ def ingest_files(pdf_paths: list[Path]) -> tuple[int, int]:
 
     embed_tokens = count_tokens([c.page_content for c in chunks])
 
-    store = get_vector_store()
+    store = get_vector_store(provider)
     for pdf_path in pdf_paths:
         store._collection.delete(where={"source": pdf_path.name})
     store.add_documents(chunks)
     return len(chunks), embed_tokens
 
 
-def ingest_all() -> tuple[int, int]:
+def ingest_all(provider: str | None = None) -> tuple[int, int]:
     """Rebuild/update the store from every PDF currently in data/pdfs/."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     pdf_paths = sorted(DATA_DIR.glob("*.pdf"))
-    return ingest_files(pdf_paths)
+    return ingest_files(pdf_paths, provider)

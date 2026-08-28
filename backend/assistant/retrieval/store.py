@@ -6,29 +6,36 @@ from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
 
 from .. import config_store
-from ..embeddings import get_embeddings
-from ..paths import COLLECTION_NAME, PERSIST_DIR
+from ..embeddings import get_embeddings, resolve_collection_name
+from ..paths import PERSIST_DIR
 from .config import K, SEARCH_TYPE
 
 
-def _get_store() -> Chroma:
-    """Open the persisted Chroma collection for reading.
+def _get_store(provider: str | None = None) -> Chroma:
+    """Open a persisted Chroma collection for reading.
 
     embedding_function is get_embeddings() from the shared embeddings.py --
     the SAME function ingestion uses to embed documents. Query and document
     vectors must come from the identical model or similarity search is
-    comparing incompatible embedding spaces.
+    comparing incompatible embedding spaces. collection_name tracks the same
+    provider (resolve_collection_name), so the two embedding backends'
+    vectors are always read from separate collections, never mixed.
+
+    `provider` overrides config_store's embeddings/embed_provider -- used by
+    the local-model A/B eval run to read the local collection explicitly.
+    Omit it for today's config-driven behavior (defaults to "openai"),
+    unchanged.
 
     collection_metadata mirrors ingestion's cosine setting. Chroma only
     applies this at collection CREATION time, so it's a no-op if ingestion
-    already created "internal_docs" -- it's set here too only so that if
+    already created the collection -- it's set here too only so that if
     retrieval is ever the first thing to touch a fresh ./chroma_db (e.g.
     someone runs the app before ever running ingestion), the collection
     still gets created with the correct metric instead of Chroma's default.
     """
     return Chroma(
-        collection_name=COLLECTION_NAME,
-        embedding_function=get_embeddings(),
+        collection_name=resolve_collection_name(provider),
+        embedding_function=get_embeddings(provider),
         persist_directory=PERSIST_DIR,
         # is_persistent=True is REQUIRED alongside client_settings, or Chroma
         # silently runs in-memory-only despite persist_directory being set
@@ -39,7 +46,7 @@ def _get_store() -> Chroma:
     )
 
 
-def get_retriever(k: int | None = None, where: dict | None = None):
+def get_retriever(k: int | None = None, where: dict | None = None, provider: str | None = None):
     """k/search_type come from config_store (live, Postgres-backed via
     Redis) on every call, falling back to this module's K/SEARCH_TYPE
     constants if the config subsystem is unreachable -- same live-reload
@@ -50,27 +57,30 @@ def get_retriever(k: int | None = None, where: dict | None = None):
     `filter` search kwarg -- see retrieval/qa.py's _detect_named_document
     for the one caller that populates this today. None (the default)
     preserves today's unfiltered, whole-corpus similarity search exactly.
+
+    `provider` overrides config_store's embeddings/embed_provider (see
+    _get_store) -- omit it for today's unchanged, config-driven behavior.
     """
     if k is None:
         k = config_store.get("retrieval", "k", K)
     search_type = config_store.get("retrieval", "search_type", SEARCH_TYPE)
-    store = _get_store()
+    store = _get_store(provider)
     search_kwargs = {"k": k}
     if where:
         search_kwargs["filter"] = where
     return store.as_retriever(search_type=search_type, search_kwargs=search_kwargs)
 
 
-def store_is_empty() -> bool:
+def store_is_empty(provider: str | None = None) -> bool:
     """True if the Chroma collection has no documents yet (no PDFs ingested)."""
-    return _get_store()._collection.count() == 0
+    return _get_store(provider)._collection.count() == 0
 
 
-def count_embeddings() -> int:
+def count_embeddings(provider: str | None = None) -> int:
     """Total chunks/vectors currently in the collection -- the admin
     monitoring dashboard's "embeddings present" figure. Reads Chroma
     directly rather than summing documents.chunk_count in Postgres, since
     those two are only ever tolerant-of-drift, not guaranteed in lockstep
     (see db.py/api.py's comments on the three stores getting out of sync).
     """
-    return _get_store()._collection.count()
+    return _get_store(provider)._collection.count()

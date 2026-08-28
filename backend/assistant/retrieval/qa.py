@@ -3,6 +3,7 @@ grounded, cited answer -- ties retrieval/store.py, retrieval/citations.py,
 and retrieval/prompt.py together.
 """
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
@@ -36,6 +37,7 @@ from .prompt import (
     GENERATION_TEMPERATURE,
     INJECTION_DEFENSE_PREAMBLE,
     SYSTEM_PROMPT,
+    VOICE_SYSTEM_PROMPT,
 )
 from .store import get_retriever, store_is_empty
 
@@ -300,12 +302,25 @@ def answer_question(
     unaffected: it still searches on only the current question's text.
 
     Returns one of several fixed responses (with empty sources) instead of a
-    grounded content answer when one isn't appropriate. Two of these are
-    caught before the LLM is ever called: abusive/harassing input (see
-    _is_abusive, an OpenAI Moderation API call) and "what documents do you
-    have" (see _is_list_documents_question, a plain keyword check -- gets
-    the real current library). The rest are the generation model's own
-    judgment, made in the same call that also tries to answer: a
+    grounded content answer when one isn't appropriate. Abusive/harassing
+    input (see _is_abusive, an OpenAI Moderation API call) always wins over
+    any other result, but no longer GATES the rest of the pipeline the way
+    it reads it might from the code shape below -- moderation and
+    _generate_answer (list-documents / empty-store / retrieval / generation)
+    now run CONCURRENTLY (see _run_moderation_and_generation), each in its
+    own thread, joined with asyncio.gather. Moderation's result is only
+    consulted right before this function returns: if it flagged the
+    question, the generated answer -- list-documents answer, retrieved-and-
+    generated answer, whatever _generate_answer produced -- is discarded and
+    fallback_abuse is returned instead. This means an abusive question still
+    always reaches the caller as a refusal, never a real answer (same safety
+    behavior as before), it's just checked at the end instead of gating when
+    generation starts -- so a normal, non-abusive question no longer pays
+    moderation's network latency serially in front of retrieval+generation.
+    "What documents do you have" (see _is_list_documents_question, a plain
+    keyword check -- gets the real current library) is one of
+    _generate_answer's own early returns. The rest are the generation
+    model's own judgment, made in the same call that also tries to answer: a
     greeting/small talk gets a friendly intro, a request for a human gets
     pointed at HR, gibberish gets asked to be retyped, a real-but-vague
     question asks the user to rephrase, an unrelated one says so, and a
@@ -353,9 +368,102 @@ def answer_question(
     if not question:
         return RagResult(answer="Please enter a question.", sources=[], num_chunks_retrieved=0)
 
-    if _is_abusive(question):
+    # Moderation and the rest of the pipeline now run CONCURRENTLY (see
+    # _run_moderation_and_generation / _generate_answer below) instead of
+    # moderation gating everything that follows -- moderation's result is
+    # awaited only once _generate_answer's result is already in hand, right
+    # here, before this function returns.
+    abusive, result = asyncio.run(
+        _run_moderation_and_generation(
+            question,
+            previous_title,
+            chat_history,
+            system_prompt,
+            fallback_greeting,
+            fallback_handoff,
+            fallback_unclear,
+            fallback_gibberish,
+            fallback_unrelated,
+            fallback_unanswered,
+            fallback_dangerous,
+            generation_model,
+            generation_temperature,
+        )
+    )
+    if abusive:
         return RagResult(answer=fallback_abuse, sources=[], num_chunks_retrieved=0)
+    return result
 
+
+async def _run_moderation_and_generation(
+    question: str,
+    previous_title: str | None,
+    chat_history: list[dict] | None,
+    system_prompt: str,
+    fallback_greeting: str,
+    fallback_handoff: str,
+    fallback_unclear: str,
+    fallback_gibberish: str,
+    fallback_unrelated: str,
+    fallback_unanswered: str,
+    fallback_dangerous: str,
+    generation_model: str,
+    generation_temperature: float,
+) -> tuple[bool, "RagResult"]:
+    """Runs _is_abusive(question) (moderation) and _generate_answer(...)
+    (list-documents / empty-store / retrieval / generation) concurrently,
+    each in its own thread via asyncio.to_thread, joined with
+    asyncio.gather -- this codebase's existing async-concurrency pattern for
+    running blocking I/O side by side (see
+    assistant/orchestration/workflows/ingestion_workflow.py's
+    IngestDocumentsWorkflow.run, which gathers one activity per file the
+    same way). Moderation used to gate _generate_answer from starting at
+    all; now it runs alongside the full retrieval->generation pipeline, not
+    just alongside retrieval, and answer_question() is the one that decides
+    which of the two results to actually return.
+    """
+    return await asyncio.gather(
+        asyncio.to_thread(_is_abusive, question),
+        asyncio.to_thread(
+            _generate_answer,
+            question,
+            previous_title,
+            chat_history,
+            system_prompt,
+            fallback_greeting,
+            fallback_handoff,
+            fallback_unclear,
+            fallback_gibberish,
+            fallback_unrelated,
+            fallback_unanswered,
+            fallback_dangerous,
+            generation_model,
+            generation_temperature,
+        ),
+    )
+
+
+def _generate_answer(
+    question: str,
+    previous_title: str | None,
+    chat_history: list[dict] | None,
+    system_prompt: str,
+    fallback_greeting: str,
+    fallback_handoff: str,
+    fallback_unclear: str,
+    fallback_gibberish: str,
+    fallback_unrelated: str,
+    fallback_unanswered: str,
+    fallback_dangerous: str,
+    generation_model: str,
+    generation_temperature: float,
+) -> RagResult:
+    """Everything answer_question() used to do AFTER its (now-removed)
+    inline `if _is_abusive(question): return ...` gate -- retrieval,
+    chunking, the prompt, and citation logic here are byte-for-byte
+    unchanged from before this function was split out; only moderation's
+    place in the control flow moved (see _run_moderation_and_generation).
+    """
     if _is_list_documents_question(question):
         return RagResult(answer=_list_documents_answer(), sources=[], num_chunks_retrieved=0)
 
@@ -501,6 +609,246 @@ def answer_question(
     # and extract_cited_docs for why (this is the citation-precision fix:
     # retrieved-but-unused chunks, e.g. a same-shaped chunk from the wrong
     # company's handbook, no longer show up as "sources").
+    cited_docs = extract_cited_docs(answer_text, docs)
+
+    return RagResult(
+        answer=answer_text,
+        sources=dedupe_sources(cited_docs),
+        num_chunks_retrieved=len(docs),
+        title=title,
+        model=generation_model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+# --------------------------------------------------------------------------
+# Voice path -- fully additive parallel to answer_question() above. Nothing
+# in this section is imported or called by answer_question()/_generate_answer,
+# and nothing above this line was changed to add it. Used only by
+# POST /voice/ask (see api.py), the realtime voice model's search_policies
+# tool call.
+# --------------------------------------------------------------------------
+
+# Retrieval width for the voice path only -- shorter than the text-chat
+# path's config-driven default (15, see config_store.seed_defaults) since a
+# 1-3 sentence spoken answer doesn't need as much supporting context, and a
+# smaller context/prompt keeps per-turn latency down for a realtime tool
+# call. Deliberately NOT read from config_store -- a fixed characteristic of
+# this path, not a knob shared with (or capable of drifting) answer_question()'s.
+VOICE_RETRIEVAL_K = 6
+
+
+def answer_question_voice(question: str, chat_history: list[dict] | None = None) -> RagResult:
+    """Voice counterpart to answer_question() -- same RagResult shape
+    (answer + sources, for a tool-call bridge to speak the answer and show
+    the citations on screen), but VOICE_SYSTEM_PROMPT (1-3 spoken sentences,
+    no lists -- see prompt.py) instead of SYSTEM_PROMPT, and
+    get_retriever(k=VOICE_RETRIEVAL_K) instead of the text path's default.
+
+    No previous_title concept here -- a voice tool call isn't a titled chat
+    session the way the text UI is, so previous_title is always None/"None"
+    in the underlying prompt (see _generate_voice_answer). chat_history
+    still works exactly like answer_question()'s: the caller (POST
+    /voice/ask) is expected to pass whatever prior turns exist for the
+    session, same [{"role", "content"}, ...] shape.
+
+    Moderation still runs CONCURRENTLY with retrieval+generation, same
+    asyncio.gather/asyncio.to_thread pattern and the same _is_abusive check
+    as answer_question() -- a voice question gets the identical abuse
+    guardrail as a typed one, just checked against this call's own result
+    (see _run_moderation_and_generation_voice).
+    """
+    require_openai_api_key()
+
+    fallback_greeting = config_store.get("generation", "fallback_greeting", FALLBACK_GREETING)
+    fallback_handoff = config_store.get("generation", "fallback_handoff", FALLBACK_HANDOFF)
+    fallback_unclear = config_store.get("generation", "fallback_unclear", FALLBACK_UNCLEAR)
+    fallback_gibberish = config_store.get("generation", "fallback_gibberish", FALLBACK_GIBBERISH)
+    fallback_unrelated = config_store.get("generation", "fallback_unrelated", FALLBACK_UNRELATED)
+    fallback_unanswered = config_store.get("generation", "fallback_unanswered", FALLBACK_UNANSWERED)
+    fallback_abuse = config_store.get("generation", "fallback_abuse", FALLBACK_ABUSE)
+    fallback_dangerous = config_store.get("generation", "fallback_dangerous", FALLBACK_DANGEROUS)
+    generation_model = config_store.get("generation", "model", GENERATION_MODEL)
+    generation_temperature = config_store.get("generation", "temperature", GENERATION_TEMPERATURE)
+
+    question = (question or "").strip()
+    if not question:
+        return RagResult(answer="Please enter a question.", sources=[], num_chunks_retrieved=0)
+
+    abusive, result = asyncio.run(
+        _run_moderation_and_generation_voice(
+            question,
+            chat_history,
+            fallback_greeting,
+            fallback_handoff,
+            fallback_unclear,
+            fallback_gibberish,
+            fallback_unrelated,
+            fallback_unanswered,
+            fallback_dangerous,
+            generation_model,
+            generation_temperature,
+        )
+    )
+    if abusive:
+        return RagResult(answer=fallback_abuse, sources=[], num_chunks_retrieved=0)
+    return result
+
+
+async def _run_moderation_and_generation_voice(
+    question: str,
+    chat_history: list[dict] | None,
+    fallback_greeting: str,
+    fallback_handoff: str,
+    fallback_unclear: str,
+    fallback_gibberish: str,
+    fallback_unrelated: str,
+    fallback_unanswered: str,
+    fallback_dangerous: str,
+    generation_model: str,
+    generation_temperature: float,
+) -> tuple[bool, "RagResult"]:
+    """Voice counterpart to _run_moderation_and_generation -- identical
+    concurrency shape (asyncio.gather over two asyncio.to_thread calls),
+    calling _generate_voice_answer instead of _generate_answer.
+    """
+    return await asyncio.gather(
+        asyncio.to_thread(_is_abusive, question),
+        asyncio.to_thread(
+            _generate_voice_answer,
+            question,
+            chat_history,
+            fallback_greeting,
+            fallback_handoff,
+            fallback_unclear,
+            fallback_gibberish,
+            fallback_unrelated,
+            fallback_unanswered,
+            fallback_dangerous,
+            generation_model,
+            generation_temperature,
+        ),
+    )
+
+
+def _generate_voice_answer(
+    question: str,
+    chat_history: list[dict] | None,
+    fallback_greeting: str,
+    fallback_handoff: str,
+    fallback_unclear: str,
+    fallback_gibberish: str,
+    fallback_unrelated: str,
+    fallback_unanswered: str,
+    fallback_dangerous: str,
+    generation_model: str,
+    generation_temperature: float,
+) -> RagResult:
+    """Voice counterpart to _generate_answer -- same retrieval/generation
+    shape and the same shared helpers (_is_list_documents_question,
+    store_is_empty, _detect_named_document, the leave-ceiling advisory
+    injection, format_context, citation extraction), deliberately
+    duplicated rather than parameterizing _generate_answer, so the text
+    path above is never at risk of being changed by voice-path work. The
+    three real differences from _generate_answer: VOICE_SYSTEM_PROMPT
+    instead of the config-driven system_prompt, get_retriever(k=
+    VOICE_RETRIEVAL_K) instead of the default k, and previous_title is
+    always _NO_PREVIOUS_TITLE (voice has no titled-session concept).
+    """
+    if _is_list_documents_question(question):
+        return RagResult(answer=_list_documents_answer(), sources=[], num_chunks_retrieved=0)
+
+    if store_is_empty():
+        return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
+
+    history_messages = _build_history_messages(chat_history)
+
+    named_document = _detect_named_document(question)
+    retriever = get_retriever(
+        k=VOICE_RETRIEVAL_K, where={"source": named_document} if named_document else None
+    )
+    docs = retriever.invoke(question)
+
+    if not docs:
+        return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
+
+    # Same goal-oriented-advisory leave-ceiling injection as _generate_answer
+    # -- see that function's comment for the full rationale.
+    if context_has_leave_policy(docs):
+        stated = detect_stated_balance(question)
+        if stated and is_ceiling_bucket(stated["bucket"]):
+            fact_content = build_stated_balance_fact(stated["bucket"], stated["stated_amount"])
+        else:
+            fact_content = compute_leave_ceiling().fact_string
+
+        docs = docs + [
+            Document(
+                page_content=fact_content,
+                metadata={
+                    "source": "Calfus India Employee Handbook v4.pdf",
+                    "page": 13,
+                    "section": "5.3 Leave Policy",
+                    "subsection": "System-Verified Computed Fact",
+                },
+            )
+        ]
+
+    context = format_context(docs)
+
+    llm = ChatOpenAI(model=generation_model, temperature=generation_temperature, seed=42)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", INJECTION_DEFENSE_PREAMBLE + VOICE_SYSTEM_PROMPT),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{user_question}"),
+        ]
+    )
+    chain = prompt | llm
+
+    response = chain.invoke(
+        {
+            "chat_history": history_messages,
+            "context": context,
+            "user_question": question,
+            "previous_title": _NO_PREVIOUS_TITLE,
+            "fallback_greeting": fallback_greeting,
+            "fallback_handoff": fallback_handoff,
+            "fallback_unclear": fallback_unclear,
+            "fallback_gibberish": fallback_gibberish,
+            "fallback_unrelated": fallback_unrelated,
+            "fallback_unanswered": fallback_unanswered,
+            "fallback_dangerous": fallback_dangerous,
+        }
+    )
+    title, answer_text = _split_title_and_answer(response.content)
+
+    usage = getattr(response, "usage_metadata", None) or {}
+    prompt_tokens = usage.get("input_tokens")
+    completion_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+
+    if answer_text in (
+        fallback_greeting,
+        fallback_handoff,
+        fallback_gibberish,
+        fallback_unclear,
+        fallback_unrelated,
+        fallback_unanswered,
+        fallback_dangerous,
+    ):
+        return RagResult(
+            answer=answer_text,
+            sources=[],
+            num_chunks_retrieved=len(docs),
+            title=title,
+            model=generation_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+
     cited_docs = extract_cited_docs(answer_text, docs)
 
     return RagResult(
