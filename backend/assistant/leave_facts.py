@@ -125,16 +125,43 @@ def compute_leave_ceiling() -> LeaveCeiling:
 
 def context_has_leave_policy(docs) -> bool:
     """True if any retrieved chunk in `docs` is from this policy's page --
-    the trigger for injecting the ceiling fact into <context> (see
-    retrieval/qa.answer_question). Deliberately simple (source + page match,
-    no query classification) -- there's no goal-oriented-advisory query
-    detector in this codebase yet; this is the simplest thing that works,
-    per the task that introduced it.
+    NOT sufficient on its own to inject the ceiling fact; see
+    is_leave_planning_question below for the other half of that check.
+    Deliberately simple (source + page match, no query classification) --
+    there's no goal-oriented-advisory query detector in this codebase yet;
+    this is the simplest thing that works, per the task that introduced it.
     """
     return any(
         doc.metadata.get("source") == _SOURCE_FILE and doc.metadata.get("page") == _SOURCE_PAGE
         for doc in docs
     )
+
+
+# A bare day-count ("12 days", "40 days", "15 earned leave days") is what
+# distinguishes an actual leave-day-planning/advisory question (see
+# prompt.py's <goal_oriented_advisory>) from one that merely happens to
+# retrieve a Leave Policy chunk because it's topically adjacent -- e.g. a
+# Work From Home policy question retrieving the same handbook page's
+# neighboring Leave Policy section (5.3) too, purely because the two
+# sections share a page (5.4 WFH, same page as 5.3 Leave). Calibrated
+# against this codebase's three real advisory eval questions -- "take 12
+# days off", "take 40 days off", "20 days off, ... 15 earned leave days
+# left" -- all three state an explicit day count; a plain policy-lookup
+# question, even one that's topically near leave (like the WFH case),
+# doesn't.
+_DAY_COUNT_RE = re.compile(r"\b\d+\s*days?\b", re.IGNORECASE)
+
+
+def is_leave_planning_question(question: str) -> bool:
+    """True if `question` itself states a day count -- the other half of
+    the ceiling-fact injection trigger (see context_has_leave_policy).
+    Deliberately narrow, same reasoning as detect_stated_balance below --
+    the failure mode is NOT injecting the fact (falls through to a plain
+    grounded answer, which is what a non-planning question needs anyway),
+    never a false positive that hijacks an unrelated answer into advisory
+    mode and away from citing what was actually asked about.
+    """
+    return bool(_DAY_COUNT_RE.search(question or ""))
 
 
 # Phrase -> canonical bucket key, for detect_stated_balance() below. Deliberately

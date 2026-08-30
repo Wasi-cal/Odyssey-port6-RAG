@@ -20,6 +20,7 @@ from ..leave_facts import (
     context_has_leave_policy,
     detect_stated_balance,
     is_ceiling_bucket,
+    is_leave_planning_question,
 )
 from ..openai_key import require_openai_api_key
 from ..paths import DATA_DIR
@@ -128,32 +129,46 @@ def _build_history_messages(chat_history: list[dict] | None) -> list:
     return messages
 
 
-def _split_title_and_answer(raw_text: str) -> tuple[str | None, str]:
+def _split_title_and_answer(raw_text: str) -> tuple[str | None, str, str]:
     """Splits the model's "TITLE: ...\\nANSWER: ...\\nCitations: ..." envelope
-    into (title, answer) -- the Citations line itself is discarded here;
-    extract_cited_docs (called later in answer_question) finds citation
-    labels from the inline "[n]" markers in the answer body, which is a
-    superset of what the trailing Citations line lists anyway.
+    into (title, answer, citations_text).
+
+    _generate_answer (text path) ignores citations_text and calls
+    extract_cited_docs on the answer body instead -- SYSTEM_PROMPT wants
+    inline "[n]" markers left in the answer (it's read on-screen, so
+    they're fine there), making the trailing Citations line a redundant
+    superset. _generate_voice_answer (voice path) does the opposite: it
+    NEEDS citations_text, because VOICE_SYSTEM_PROMPT deliberately keeps
+    inline brackets OUT of the spoken answer (so they're never read
+    aloud) and reports them ONLY on the Citations line -- extract_cited_docs
+    on the answer body there would always find nothing. Confirmed as a
+    real, previously-silent bug: a well-formed voice answer that correctly
+    followed the "don't speak the brackets" instruction always came back
+    with zero sources; the few cases that appeared to work were the model
+    skipping the TITLE/ANSWER envelope entirely, which fell through to
+    returning raw_text unsplit and coincidentally left the Citations line
+    inside what got passed to extract_cited_docs.
 
     Tries the three-group TITLE/ANSWER/Citations shape first, falls back to
-    the older two-group TITLE/ANSWER shape (no Citations line) if that
-    doesn't match, and only falls back to (None, raw_text) if neither does
-    -- three levels of graceful degradation so a formatting slip never
-    shows the user a garbled "TITLE: ..." response.
+    the older two-group TITLE/ANSWER shape (no Citations line, citations_text
+    empty) if that doesn't match, and only falls back to (None, raw_text, "")
+    if neither does -- three levels of graceful degradation so a formatting
+    slip never shows the user a garbled "TITLE: ..." response.
     """
     raw_text = raw_text.strip()
     match = _TITLE_ANSWER_CITATIONS_RE.match(raw_text)
     if match:
-        title, answer, _citations = match.groups()
+        title, answer, citations_text = match.groups()
     else:
         match = _TITLE_ANSWER_RE.match(raw_text)
         if not match:
-            return None, raw_text
+            return None, raw_text, ""
         title, answer = match.groups()
+        citations_text = ""
     title = title.strip()
     if not title or title == _NO_PREVIOUS_TITLE:
         title = None
-    return title, answer.strip()
+    return title, answer.strip(), citations_text.strip()
 
 
 def _list_documents_answer() -> str:
@@ -443,6 +458,69 @@ async def _run_moderation_and_generation(
     )
 
 
+def _inject_leave_ceiling_advisory(docs: list[Document], question: str) -> list[Document]:
+    """GOAL-ORIENTED ADVISORY support (see prompt.py's <goal_oriented_advisory>
+    and leave_facts.py's module docstring): there's no query-intent
+    classifier for "this is an advisory goal, not a lookup" yet, so this is
+    the simplest thing that works -- whenever retrieval already surfaced
+    the Leave Policy page AND the question itself states a day count (see
+    leave_facts.is_leave_planning_question), also hand the model the
+    pre-computed, hardcoded ceiling as one more numbered, citable context
+    chunk. This replaces asking the model to derive that number itself
+    every time, which it did unreliably (see leave_facts.py).
+
+    The question-side check (added after a real incident) matters because
+    context_has_leave_policy alone over-triggers: a Work From Home policy
+    question retrieves the Leave Policy chunk too purely because they're
+    adjacent sections on the same handbook page, with nothing to do with
+    day-count planning. Injecting the ceiling fact there measurably
+    degraded the model's citation behavior on an otherwise-unrelated,
+    correctly-answerable question -- confirmed by removing just the
+    injected chunk and observing citations return. Gating on an actual
+    day-count mention in the question keeps the real advisory cases (which
+    always state one) working while no longer firing on merely-adjacent
+    lookups.
+
+    If the employee's own message states their remaining balance for a
+    bucket that WOULD have contributed to that generic ceiling (e.g. "I
+    only have 15 earned leave days left"), inject a scenario-specific fact
+    for that bucket instead of the generic one -- the model then never
+    sees both the generic default (21) and the stated number (15) in
+    context at once, so there's nothing to reconcile or accidentally
+    state side by side (see git history: asking it to resolve that
+    conflict itself was unreliable, same failure shape as the ceiling
+    arithmetic this whole module replaces). A stated balance for a bucket
+    OUTSIDE the generic ceiling (e.g. a stated Sick Leave balance) doesn't
+    affect it -- the generic ceiling still applies unmodified.
+
+    Shared verbatim by _generate_answer and _generate_voice_answer -- both
+    call this the same way, on the same `docs`/`question` they already
+    have in hand; everything else about the two functions (prompt
+    selection, retrieval k, previous_title handling, the fallback-string
+    comparison) is untouched and deliberately still duplicated -- see
+    _generate_voice_answer's docstring for why.
+    """
+    if context_has_leave_policy(docs) and is_leave_planning_question(question):
+        stated = detect_stated_balance(question)
+        if stated and is_ceiling_bucket(stated["bucket"]):
+            fact_content = build_stated_balance_fact(stated["bucket"], stated["stated_amount"])
+        else:
+            fact_content = compute_leave_ceiling().fact_string
+
+        docs = docs + [
+            Document(
+                page_content=fact_content,
+                metadata={
+                    "source": "Calfus India Employee Handbook v4.pdf",
+                    "page": 13,
+                    "section": "5.3 Leave Policy",
+                    "subsection": "System-Verified Computed Fact",
+                },
+            )
+        ]
+    return docs
+
+
 def _generate_answer(
     question: str,
     previous_title: str | None,
@@ -485,45 +563,7 @@ def _generate_answer(
     if not docs:
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
 
-    # GOAL-ORIENTED ADVISORY support (see prompt.py's <goal_oriented_advisory>
-    # and leave_facts.py's module docstring): there's no query-intent
-    # classifier for "this is an advisory goal, not a lookup" yet, so this is
-    # the simplest thing that works -- whenever retrieval already surfaced
-    # the Leave Policy page on its own (i.e. the question was leave-related
-    # regardless of phrasing), also hand the model the pre-computed,
-    # hardcoded ceiling as one more numbered, citable context chunk. This
-    # replaces asking the model to derive that number itself every time,
-    # which it did unreliably (see leave_facts.py).
-    #
-    # If the employee's own message states their remaining balance for a
-    # bucket that WOULD have contributed to that generic ceiling (e.g. "I
-    # only have 15 earned leave days left"), inject a scenario-specific fact
-    # for that bucket instead of the generic one -- the model then never
-    # sees both the generic default (21) and the stated number (15) in
-    # context at once, so there's nothing to reconcile or accidentally
-    # state side by side (see git history: asking it to resolve that
-    # conflict itself was unreliable, same failure shape as the ceiling
-    # arithmetic this whole module replaces). A stated balance for a bucket
-    # OUTSIDE the generic ceiling (e.g. a stated Sick Leave balance) doesn't
-    # affect it -- the generic ceiling still applies unmodified.
-    if context_has_leave_policy(docs):
-        stated = detect_stated_balance(question)
-        if stated and is_ceiling_bucket(stated["bucket"]):
-            fact_content = build_stated_balance_fact(stated["bucket"], stated["stated_amount"])
-        else:
-            fact_content = compute_leave_ceiling().fact_string
-
-        docs = docs + [
-            Document(
-                page_content=fact_content,
-                metadata={
-                    "source": "Calfus India Employee Handbook v4.pdf",
-                    "page": 13,
-                    "section": "5.3 Leave Policy",
-                    "subsection": "System-Verified Computed Fact",
-                },
-            )
-        ]
+    docs = _inject_leave_ceiling_advisory(docs, question)
 
     context = format_context(docs)
 
@@ -569,7 +609,7 @@ def _generate_answer(
             "fallback_dangerous": fallback_dangerous,
         }
     )
-    title, answer_text = _split_title_and_answer(response.content)
+    title, answer_text, _citations_text = _split_title_and_answer(response.content)
 
     # LangChain's ChatOpenAI populates usage_metadata on every AIMessage --
     # a standardized {"input_tokens", "output_tokens", "total_tokens"} dict,
@@ -774,26 +814,7 @@ def _generate_voice_answer(
     if not docs:
         return RagResult(answer=fallback_unanswered, sources=[], num_chunks_retrieved=0)
 
-    # Same goal-oriented-advisory leave-ceiling injection as _generate_answer
-    # -- see that function's comment for the full rationale.
-    if context_has_leave_policy(docs):
-        stated = detect_stated_balance(question)
-        if stated and is_ceiling_bucket(stated["bucket"]):
-            fact_content = build_stated_balance_fact(stated["bucket"], stated["stated_amount"])
-        else:
-            fact_content = compute_leave_ceiling().fact_string
-
-        docs = docs + [
-            Document(
-                page_content=fact_content,
-                metadata={
-                    "source": "Calfus India Employee Handbook v4.pdf",
-                    "page": 13,
-                    "section": "5.3 Leave Policy",
-                    "subsection": "System-Verified Computed Fact",
-                },
-            )
-        ]
+    docs = _inject_leave_ceiling_advisory(docs, question)
 
     context = format_context(docs)
 
@@ -822,7 +843,7 @@ def _generate_voice_answer(
             "fallback_dangerous": fallback_dangerous,
         }
     )
-    title, answer_text = _split_title_and_answer(response.content)
+    title, answer_text, citations_text = _split_title_and_answer(response.content)
 
     usage = getattr(response, "usage_metadata", None) or {}
     prompt_tokens = usage.get("input_tokens")
@@ -849,7 +870,18 @@ def _generate_voice_answer(
             total_tokens=total_tokens,
         )
 
-    cited_docs = extract_cited_docs(answer_text, docs)
+    # Prefer citations_text (the trailing "Citations: [n], [m]" line) --
+    # see _split_title_and_answer's docstring for why the voice path needs
+    # that instead of the spoken answer body. Falls back to scanning
+    # answer_text if that comes up empty: the model doesn't always emit
+    # the TITLE:/ANSWER:/Citations: envelope at all for every question --
+    # observed live returning bare prose with an inline "[n]" and no
+    # TITLE:/ANSWER: prefixes -- and _split_title_and_answer's own
+    # fallback for that case folds everything (including any inline
+    # bracket) into answer_text with citations_text empty. Checking both
+    # means a citation is found regardless of which shape the model
+    # actually returned.
+    cited_docs = extract_cited_docs(citations_text, docs) or extract_cited_docs(answer_text, docs)
 
     return RagResult(
         answer=answer_text,
