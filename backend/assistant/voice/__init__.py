@@ -33,6 +33,8 @@ __all__ = [
     "resolve_deepgram_think_model",
     "resolve_deepgram_listen_model",
     "resolve_deepgram_speak_model",
+    "resolve_deepgram_think_temperature",
+    "resolve_openai_temperature",
     "get_voice_provider",
 ]
 
@@ -78,6 +80,26 @@ def resolve_deepgram_speak_model() -> str:
     return config_store.get("voice", "deepgram_speak_model", defaults.DEEPGRAM_SPEAK_MODEL)
 
 
+def resolve_deepgram_think_temperature() -> float:
+    """Sampling temperature routers/voice.py's llm_proxy pins on every
+    OpenAI chat-completions request it forwards for the Deepgram BYO-LLM
+    path -- see defaults.py's bug-fix note (#8) for why this exists: the
+    same fixed persona instructions were previously sampled at whatever
+    temperature Deepgram's own think request happened to carry (observed:
+    none at all, i.e. OpenAI's own default of 1.0), which read as an
+    inconsistent "personality" call to call.
+    """
+    return config_store.get("voice", "deepgram_think_temperature", defaults.DEEPGRAM_THINK_TEMPERATURE)
+
+
+def resolve_openai_temperature() -> float:
+    """Sampling temperature for the OpenAI Realtime session itself -- see
+    defaults.py's bug-fix note (#8). 0.6 is OpenAI's documented Realtime
+    API minimum; there's no lower knob or a `seed` equivalent for this path.
+    """
+    return config_store.get("voice", "openai_temperature", defaults.OPENAI_REALTIME_TEMPERATURE)
+
+
 def get_voice_provider() -> RealtimeVoiceProvider:
     """The active realtime voice provider, fully configured from
     config_store. Every value this reads is hot-reloadable (config_store's
@@ -112,4 +134,5 @@ def get_voice_provider() -> RealtimeVoiceProvider:
         model=resolve_openai_model(),
         voice=resolve_openai_voice(),
         instructions=openai_instructions,
+        temperature=resolve_openai_temperature(),
     )

@@ -33,10 +33,18 @@ def _to_openai_tool(tool: ToolSpec) -> dict[str, Any]:
 
 
 class OpenAIVoiceProvider(RealtimeVoiceProvider):
-    def __init__(self, model: str, voice: str, instructions: str):
+    def __init__(self, model: str, voice: str, instructions: str, temperature: float | None = None):
         self._model = model
         self._voice = voice
         self._instructions = instructions
+        # See defaults.py's bug-fix note (#8, "personality inconsistent
+        # across restarts") -- pins sampling temperature on the Realtime
+        # session so the same persona instructions aren't sampled at
+        # OpenAI's much higher default (0.8) every time. None (only if a
+        # caller explicitly constructs this without one) leaves the field
+        # out of the session dict below, falling back to OpenAI's own
+        # default rather than sending an invalid value.
+        self._temperature = temperature
 
     def create_session(self, tools: list[ToolSpec]) -> SessionCredentials:
         """Mints a short-lived OpenAI Realtime client secret (~1 min) for
@@ -60,6 +68,7 @@ class OpenAIVoiceProvider(RealtimeVoiceProvider):
                     },
                     "tools": [_to_openai_tool(t) for t in tools],
                     "tool_choice": "auto",
+                    **({"temperature": self._temperature} if self._temperature is not None else {}),
                 },
             )
         except Exception as e:

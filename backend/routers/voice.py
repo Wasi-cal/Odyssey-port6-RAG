@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from assistant import config_store
-from assistant.voice import ToolSpec, get_voice_provider
+from assistant.voice import ToolSpec, get_voice_provider, resolve_deepgram_think_temperature
 from rag import answer_question_voice
 
 from ._shared import SourceInfo, get_current_user, run_ask_and_log
@@ -241,8 +241,22 @@ async def llm_proxy(request: Request, background_tasks: BackgroundTasks):
     # parse hiccup here affect the actual proxy call below. Every call's
     # `messages` array is cumulative (see _log_voice_llm_call's docstring),
     # so the latest `user` turn is the new part worth recording each time.
+    #
+    # Bug fix (#8, "personality inconsistent every restart" -- see
+    # defaults.py's DEEPGRAM_THINK_TEMPERATURE docstring for the full root
+    # cause): Deepgram's think request to this endpoint is confirmed to be
+    # just {model, stream, messages, tools} -- no `temperature`, so the
+    # request forwarded to OpenAI below used to carry none either, sampling
+    # at OpenAI's own default (1.0) instead of a pinned value. Since this
+    # endpoint is the one thing that actually builds the request OpenAI
+    # sees, `outgoing_body` (parsed JSON with `temperature` set/overridden)
+    # is what gets sent now, not the raw, unmodified `body` -- falls back to
+    # the original raw body only if it isn't valid JSON at all (shouldn't
+    # happen given Deepgram's confirmed shape, but never worth failing the
+    # whole call over).
     latest_user_message = None
     num_messages = 0
+    outgoing_body: bytes = body
     try:
         parsed = json.loads(body)
         messages = parsed.get("messages", [])
@@ -251,6 +265,8 @@ async def llm_proxy(request: Request, background_tasks: BackgroundTasks):
             if m.get("role") == "user":
                 latest_user_message = m.get("content")
                 break
+        parsed["temperature"] = resolve_deepgram_think_temperature()
+        outgoing_body = json.dumps(parsed).encode("utf-8")
     except Exception:
         pass
 
@@ -262,7 +278,7 @@ async def llm_proxy(request: Request, background_tasks: BackgroundTasks):
                 "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
                 "Content-Type": "application/json",
             },
-            data=body,
+            data=outgoing_body,
             stream=True,
             timeout=30,
         )
