@@ -22,7 +22,7 @@ const SPARKLE_PATH =
  */
 export function HeroEmpty({ onPickSuggestion, activeCategory, onCategoryChange }: HeroEmptyProps) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4 p-10 text-center">
+    <div className="animate-fadeInUp flex flex-1 flex-col items-center justify-center gap-4 p-10 text-center">
       <svg viewBox="0 0 24 24" width="36" height="36" fill="#6d4bb8">
         <path d={SPARKLE_PATH} />
       </svg>
@@ -40,7 +40,7 @@ export function HeroEmpty({ onPickSuggestion, activeCategory, onCategoryChange }
             <button
               key={c}
               onClick={() => onCategoryChange(c)}
-              className={`rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold transition-colors ${
+              className={`rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold transition-colors duration-200 ease-out ${
                 active ? 'bg-[#6d4bb8] text-white' : 'bg-white text-[#5b5566] hover:bg-[rgba(138,99,214,0.08)]'
               }`}
               style={active ? undefined : { border: '1px solid rgba(30,20,45,0.10)' }}
@@ -56,7 +56,7 @@ export function HeroEmpty({ onPickSuggestion, activeCategory, onCategoryChange }
           <button
             key={p.title}
             onClick={() => onPickSuggestion(p.q)}
-            className="rounded-[20px] border border-[rgba(30,20,45,0.10)] bg-white px-4 py-[9px] text-[13px] font-medium text-[#433d55] transition-colors hover:bg-[rgba(138,99,214,0.06)]"
+            className="rounded-[20px] border border-[rgba(30,20,45,0.10)] bg-white px-4 py-[9px] text-[13px] font-medium text-[#433d55] transition-colors duration-200 ease-out hover:bg-[rgba(138,99,214,0.06)]"
           >
             {p.title}
           </button>

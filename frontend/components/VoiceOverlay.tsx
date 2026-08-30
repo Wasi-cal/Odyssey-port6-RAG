@@ -36,10 +36,14 @@ export function VoiceOverlay({ voiceStatus, captionText, sources, muted, onToggl
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
+      // animate-fadeIn: the backdrop used to appear/disappear instantly the
+      // moment the overlay mounted/unmounted -- a soft fade (+ the
+      // backdrop-filter blur already there) reads as the call opening/
+      // closing rather than snapping on screen (bug #5).
+      className="animate-fadeIn fixed inset-0 z-50 flex items-center justify-center"
       style={{ background: 'rgba(35,25,50,0.35)', backdropFilter: 'blur(6px)' }}
     >
-      <div className="flex w-[420px] max-w-[90vw] flex-col items-center gap-[22px] rounded-[28px] bg-transparent p-10 px-8">
+      <div className="animate-fadeInUp flex w-[420px] max-w-[90vw] flex-col items-center gap-[22px] rounded-[28px] bg-transparent p-10 px-8">
         <VoiceOrb state={orbState} />
 
         <div className="text-center">
@@ -52,7 +56,7 @@ export function VoiceOverlay({ voiceStatus, captionText, sources, muted, onToggl
           <button
             onClick={onToggleMute}
             title={muted ? 'Unmute microphone' : 'Mute microphone'}
-            className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-[0_1px_4px_rgba(30,20,45,0.08)] transition-transform hover:scale-105"
+            className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-[0_1px_4px_rgba(30,20,45,0.08)] transition-transform duration-200 ease-out hover:scale-105"
           >
             <svg
               viewBox="0 0 24 24"
@@ -74,7 +78,7 @@ export function VoiceOverlay({ voiceStatus, captionText, sources, muted, onToggl
           <button
             onClick={onClose}
             title="End call"
-            className="flex h-14 w-14 items-center justify-center rounded-full bg-[#e0455a] shadow-[0_4px_14px_rgba(224,69,90,0.35)] transition-transform hover:scale-105"
+            className="flex h-14 w-14 items-center justify-center rounded-full bg-[#e0455a] shadow-[0_4px_14px_rgba(224,69,90,0.35)] transition-transform duration-200 ease-out hover:scale-105"
           >
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round">
               <path d="M6 6l12 12M18 6L6 18" />

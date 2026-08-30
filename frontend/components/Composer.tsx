@@ -18,7 +18,7 @@ export function Composer({ value, onChange, onSend, onAttach, onTalk, disabled }
         <button
           onClick={onAttach}
           title="Attach a policy document"
-          className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-[#9a93a8] transition-colors hover:bg-[rgba(138,99,214,0.08)] hover:text-[#6d4bb8]"
+          className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-[#9a93a8] transition-colors duration-200 ease-out hover:bg-[rgba(138,99,214,0.08)] hover:text-[#6d4bb8]"
         >
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />

@@ -58,7 +58,7 @@ export function Sidebar({
         <button
           onClick={onOpenSettings}
           title="Settings"
-          className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[#9a93a8] transition-colors hover:bg-[rgba(138,99,214,0.08)] hover:text-[#6d4bb8]"
+          className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[#9a93a8] transition-colors duration-200 ease-out hover:bg-[rgba(138,99,214,0.08)] hover:text-[#6d4bb8]"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3" />
@@ -70,7 +70,7 @@ export function Sidebar({
       <div className="flex flex-shrink-0 items-center gap-2 px-4">
         <button
           onClick={onNewChat}
-          className="flex flex-1 items-center gap-2 rounded-xl border border-[rgba(30,20,45,0.08)] bg-white px-3.5 py-2.5 text-[13px] font-semibold text-[#3a3550] shadow-[0_1px_2px_rgba(30,20,45,0.04)] transition-colors hover:bg-[#faf6fd]"
+          className="flex flex-1 items-center gap-2 rounded-xl border border-[rgba(30,20,45,0.08)] bg-white px-3.5 py-2.5 text-[13px] font-semibold text-[#3a3550] shadow-[0_1px_2px_rgba(30,20,45,0.04)] transition-colors duration-200 ease-out hover:bg-[#faf6fd]"
         >
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#3a3550" strokeWidth="2" strokeLinecap="round">
             <path d="M12 5v14M5 12h14" />
@@ -80,7 +80,7 @@ export function Sidebar({
         <button
           onClick={onToggleSources}
           title="Documents"
-          className={`flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-xl border transition-colors ${
+          className={`flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-xl border transition-colors duration-200 ease-out ${
             sourcesOpen
               ? 'border-[rgba(138,99,214,0.25)] bg-[rgba(138,99,214,0.10)] text-[#6d4bb8]'
               : 'border-[rgba(30,20,45,0.08)] bg-white text-[#433d55] hover:bg-[#faf6fd]'
@@ -101,7 +101,7 @@ export function Sidebar({
               <button
                 key={s.title}
                 onClick={() => onPickShortcut(s.q)}
-                className="flex items-center gap-2.5 rounded-[10px] px-2.5 py-[9px] text-left text-[13px] font-medium text-[#433d55] transition-colors hover:bg-[rgba(138,99,214,0.08)]"
+                className="flex items-center gap-2.5 rounded-[10px] px-2.5 py-[9px] text-left text-[13px] font-medium text-[#433d55] transition-colors duration-200 ease-out hover:bg-[rgba(138,99,214,0.08)]"
               >
                 <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-[rgba(138,99,214,0.10)]">
                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#6d4bb8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -130,7 +130,7 @@ export function Sidebar({
                   <button
                     key={item.id}
                     onClick={() => onSelect(item)}
-                    className="flex flex-col gap-0.5 rounded-[10px] px-2.5 py-[9px] text-left transition-colors"
+                    className="flex flex-col gap-0.5 rounded-[10px] px-2.5 py-[9px] text-left transition-colors duration-200 ease-out"
                     style={{
                       background: active ? 'rgba(138,99,214,0.10)' : 'transparent',
                       color: active ? '#4a2f8a' : '#433d55',
@@ -149,7 +149,7 @@ export function Sidebar({
       <button
         onClick={onLogout}
         title="Sign out"
-        className="flex flex-shrink-0 items-center gap-2.5 border-t border-[rgba(30,20,45,0.06)] px-4 py-4 text-left transition-colors hover:bg-[rgba(138,99,214,0.05)]"
+        className="flex flex-shrink-0 items-center gap-2.5 border-t border-[rgba(30,20,45,0.06)] px-4 py-4 text-left transition-colors duration-200 ease-out hover:bg-[rgba(138,99,214,0.05)]"
       >
         <div
           className="flex h-[34px] w-[34px] flex-shrink-0 items-center justify-center rounded-full text-[13px] font-bold text-white"

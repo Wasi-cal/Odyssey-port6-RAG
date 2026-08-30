@@ -21,7 +21,7 @@ export function SourceChips({ sources, onOpenSource, className }: SourceChipsPro
         <button
           key={`${s.filename}-${s.page}-${i}`}
           onClick={() => onOpenSource(s.filename)}
-          className="flex items-center gap-1.5 rounded-full border border-[rgba(30,20,45,0.12)] bg-white px-3.5 py-[7px] text-[12.5px] font-medium text-[#5b5566] transition-colors hover:border-[#6d4bb8]/40 hover:text-[#6d4bb8]"
+          className="flex items-center gap-1.5 rounded-full border border-[rgba(30,20,45,0.12)] bg-white px-3.5 py-[7px] text-[12.5px] font-medium text-[#5b5566] transition-colors duration-200 ease-out hover:border-[#6d4bb8]/40 hover:text-[#6d4bb8]"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
