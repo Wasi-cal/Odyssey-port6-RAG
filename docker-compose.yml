@@ -82,6 +82,14 @@ services:
       - ./backend/data:/app/data
       - ./backend/chroma_db:/app/chroma_db
       - ./backend/reports:/app/reports
+      # Shared with api below -- the local embedding provider's model
+      # weights (~1.3GB, assistant/embeddings.py's "local" provider) live
+      # here so a container recreation doesn't re-download them from the
+      # HuggingFace Hub over the network every time. Safe to share across
+      # both containers: HF's cache is read-mostly after the first
+      # download, and a concurrent first-download race is vanishingly
+      # unlikely in practice (would just mean one side re-downloads).
+      - huggingface-cache:/root/.cache/huggingface
     depends_on:
       - temporal
     restart: unless-stopped
@@ -108,6 +116,9 @@ services:
       - ./backend/data:/app/data
       - ./backend/chroma_db:/app/chroma_db
       - ./backend/reports:/app/reports
+      # See worker's identical mount above for why this is shared, not
+      # per-container.
+      - huggingface-cache:/root/.cache/huggingface
     depends_on:
       temporal:
         condition: service_started
@@ -120,7 +131,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      # 300s: covers a cold, uncached local-embedding-model download
+      # (~1.3GB, observed taking up to ~4 minutes) during api.py's startup
+      # warmup -- only actually needed on the very first-ever start or if
+      # the huggingface-cache volume is removed; a warm restart finishes
+      # startup in a few seconds and reports healthy immediately. Getting
+      # this wrong isn't fatal either way -- the container just shows
+      # "unhealthy" cosmetically until startup catches up, then
+      # self-corrects -- but a comfortable margin avoids that.
+      start_period: 300s
     restart: unless-stopped
 
   # Next.js chat UI + /admin dashboard, ONE app/container now (see
@@ -171,3 +190,4 @@ volumes:
   app-db-data:
   caddy-data:
   caddy-config:
+  huggingface-cache:
