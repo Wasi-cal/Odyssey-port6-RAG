@@ -107,6 +107,35 @@ CREATE TABLE IF NOT EXISTS config_settings (
     UNIQUE (category, key)
 );
 
+-- Realtime voice vendor credentials (assistant/voice/), normalized instead
+-- of living in config_settings' generic (category, key, value) blob rows:
+-- each provider's secret shape is a real, fixed set of columns (not an
+-- arbitrary JSON value), and this table is never merged into the same
+-- Redis cache blob as everything else's config -- config_store.py reads it
+-- separately, so an admin auditing "what secrets does this app hold" has
+-- one table to look at rather than secrets scattered across generic rows.
+-- llm_proxy_secret is nullable because only Deepgram's BYO-LLM mode needs
+-- one (the shared secret api.py's /voice/llm-proxy checks); OpenAI has no
+-- equivalent.
+CREATE TABLE IF NOT EXISTS voice_provider_credentials (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('openai', 'deepgram')),
+    api_key TEXT NOT NULL,
+    llm_proxy_secret TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Deployment-wide infra settings that aren't secrets but also aren't
+-- per-provider app config -- currently just public_base_url (the publicly
+-- reachable URL Deepgram's servers call for api.py's /voice/llm-proxy).
+-- Singleton table: the boolean primary key with a CHECK forcing it to
+-- always be TRUE guarantees exactly one row ever exists, so callers never
+-- need to know a row's identity, just "the" row.
+CREATE TABLE IF NOT EXISTS deployment_settings (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    public_base_url TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Who did what to the shared document library, and when -- the admin
 -- password alone doesn't say WHO used it, since it's a shared secret, not a
 -- per-user credential. An upload is recorded here once an admin approves it
@@ -487,6 +516,48 @@ def set_config_value(category: str, key: str, value) -> None:
             "INSERT INTO config_settings (category, key, value) VALUES (%s, %s, %s) "
             "ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
             (category, key, Jsonb(value)),
+        )
+
+
+def list_voice_provider_credentials() -> list[dict]:
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT provider, api_key, llm_proxy_secret FROM voice_provider_credentials"
+        ).fetchall()
+    return [{"provider": r[0], "api_key": r[1], "llm_proxy_secret": r[2]} for r in rows]
+
+
+def set_voice_provider_credential(provider: str, *, api_key: str, llm_proxy_secret: str | None = None) -> None:
+    """Upserts one provider's credential row. `llm_proxy_secret` only
+    applies to 'deepgram' -- pass None to leave an existing value alone
+    (e.g. when only rotating api_key) rather than clobbering it, since a
+    single call site rarely has both values at once.
+    """
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO voice_provider_credentials (provider, api_key, llm_proxy_secret) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (provider) DO UPDATE SET "
+            "api_key = EXCLUDED.api_key, "
+            "llm_proxy_secret = COALESCE(EXCLUDED.llm_proxy_secret, voice_provider_credentials.llm_proxy_secret), "
+            "updated_at = now()",
+            (provider, api_key, llm_proxy_secret),
+        )
+
+
+def get_deployment_settings() -> dict:
+    with _pool.connection() as conn:
+        row = conn.execute("SELECT public_base_url FROM deployment_settings WHERE singleton").fetchone()
+    return {"public_base_url": row[0] if row else None}
+
+
+def set_deployment_setting(*, public_base_url: str) -> None:
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO deployment_settings (singleton, public_base_url) VALUES (TRUE, %s) "
+            "ON CONFLICT (singleton) DO UPDATE SET "
+            "public_base_url = EXCLUDED.public_base_url, updated_at = now()",
+            (public_base_url,),
         )
 
 

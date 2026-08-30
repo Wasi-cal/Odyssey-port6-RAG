@@ -29,6 +29,26 @@ def _load_from_postgres() -> dict:
     config: dict = {}
     for row in db.list_config_settings():
         config.setdefault(row["category"], {})[row["key"]] = row["value"]
+
+    # voice_provider_credentials / deployment_settings are their own
+    # normalized tables (assistant/db.py), not config_settings rows -- but
+    # they ride this exact same Redis cache-aside path, under synthetic
+    # categories, so every reader still goes through one get()/get_all()
+    # regardless of which table a value actually lives in. NOTE: unlike
+    # config_settings' prompts/model names, these ARE secrets -- caching
+    # them here means they sit in Redis as plaintext for up to
+    # _CACHE_TTL_SECONDS, same exposure profile as everything else this
+    # cache holds. Deliberate tradeoff for this deployment; don't assume it
+    # generalizes to a stricter security posture without reconsidering it.
+    for row in db.list_voice_provider_credentials():
+        secrets = config.setdefault("voice_secrets", {})
+        secrets[f"{row['provider']}_api_key"] = row["api_key"]
+        if row["llm_proxy_secret"] is not None:
+            secrets[f"{row['provider']}_llm_proxy_secret"] = row["llm_proxy_secret"]
+    deployment = db.get_deployment_settings()
+    if deployment["public_base_url"] is not None:
+        config.setdefault("voice_infra", {})["public_base_url"] = deployment["public_base_url"]
+
     return config
 
 
@@ -62,19 +82,55 @@ def get(category: str, key: str, default=None):
         return default
 
 
+def get_voice_secret(provider: str, field: str, default=None):
+    """`field` is 'api_key' or 'llm_proxy_secret' -- see
+    voice_provider_credentials. Same cache-aside/fallback-default contract
+    as get().
+    """
+    return get(category="voice_secrets", key=f"{provider}_{field}", default=default)
+
+
+def get_public_base_url(default=None):
+    return get(category="voice_infra", key="public_base_url", default=default)
+
+
+def _invalidate() -> None:
+    try:
+        _redis.delete(_CACHE_KEY)
+    except redis.exceptions.RedisError:
+        pass  # Next get_all() falls back to Postgres directly either way.
+
+
 def set(category: str, key: str, value) -> None:
     """Writes one setting straight to Postgres (upsert, unlike
     seed_defaults' ON CONFLICT DO NOTHING) and invalidates the cache so the
     change is visible immediately -- not just after the next
     _CACHE_TTL_SECONDS refresh. Used by in-app editors (e.g. the admin app's
     change-password form) as the alternative to editing config_settings by
-    hand in psql.
+    hand in psql. NOT for voice_secrets/voice_infra -- those live in their
+    own normalized tables (assistant/db.py), not config_settings; use
+    set_voice_secret()/set_public_base_url() for them instead.
     """
     db.set_config_value(category, key, value)
-    try:
-        _redis.delete(_CACHE_KEY)
-    except redis.exceptions.RedisError:
-        pass  # Next get_all() falls back to Postgres directly either way.
+    _invalidate()
+
+
+def set_voice_secret(provider: str, *, api_key: str, llm_proxy_secret: str | None = None) -> None:
+    """Upserts a realtime voice provider's credential row
+    (voice_provider_credentials, not config_settings) and invalidates the
+    shared cache. `llm_proxy_secret` only matters for 'deepgram' -- see
+    db.set_voice_provider_credential.
+    """
+    db.set_voice_provider_credential(provider, api_key=api_key, llm_proxy_secret=llm_proxy_secret)
+    _invalidate()
+
+
+def set_public_base_url(public_base_url: str) -> None:
+    """Upserts the singleton deployment_settings row and invalidates the
+    shared cache.
+    """
+    db.set_deployment_setting(public_base_url=public_base_url)
+    _invalidate()
 
 
 def seed_defaults() -> None:
@@ -84,6 +140,7 @@ def seed_defaults() -> None:
     so it's safe to call unconditionally on every app startup.
     """
     from .retrieval.config import SEARCH_TYPE
+    from .voice import defaults as voice_defaults
     from .retrieval.prompt import (
         FALLBACK_ABUSE,
         FALLBACK_DANGEROUS,
@@ -302,6 +359,89 @@ def seed_defaults() -> None:
                     "Hugging Face model id used when embed_provider is 'local' "
                     "(assistant/embeddings.py). Changing this only affects newly-ingested "
                     "documents, same as embed_model_name for the OpenAI provider."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "provider",
+                # Deepgram is the vendor actually in use now -- OpenAI's
+                # Realtime provider (Phase 1) is left fully in place and
+                # selectable behind the same RealtimeVoiceProvider
+                # interface (assistant/voice/), same "revert is a config
+                # value, not a re-deploy" pattern as embed_provider above.
+                "value": voice_defaults.VOICE_PROVIDER,
+                "description": (
+                    "Which realtime voice backend api.py's POST /voice/session uses "
+                    "(assistant/voice/__init__.py's get_voice_provider()): 'openai' "
+                    "(Realtime API, WebRTC, Phase 1) or 'deepgram' (Voice Agent API, "
+                    "bring-your-own-LLM mode)."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "session_instructions",
+                "value": voice_defaults.VOICE_SESSION_INSTRUCTIONS,
+                "description": (
+                    "Persona + tool-use system prompt sent to the active voice provider "
+                    "(OpenAI's session `instructions`, Deepgram's `think.prompt`). Deliberately "
+                    "excludes the opening greeting -- see the separate 'greeting' key below; "
+                    "get_voice_provider() splices the two together at request time so editing "
+                    "one doesn't require also editing the other."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "greeting",
+                "value": voice_defaults.VOICE_GREETING,
+                "description": (
+                    "What the voice agent says first, before the employee speaks. Deepgram "
+                    "speaks this directly via its own agent.greeting field (no LLM round trip); "
+                    "OpenAI has no equivalent field, so it's folded into session_instructions "
+                    "instead, paired with the frontend triggering an initial response.create."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "openai_model",
+                "value": voice_defaults.OPENAI_REALTIME_MODEL,
+                "description": "OpenAI Realtime API model id, used only when voice/provider is 'openai'.",
+            },
+            {
+                "category": "voice",
+                "key": "openai_voice",
+                "value": voice_defaults.OPENAI_REALTIME_VOICE,
+                "description": (
+                    "OpenAI Realtime TTS voice name (see openai.types.realtime's "
+                    "RealtimeAudioConfigOutputParam.voice), used only when voice/provider is 'openai'."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "deepgram_think_model",
+                "value": voice_defaults.DEEPGRAM_THINK_MODEL,
+                "description": (
+                    "Chat-completions model Deepgram's agent.think stage calls through "
+                    "api.py's /voice/llm-proxy (assistant/voice/deepgram_provider.py). Used "
+                    "only when voice/provider is 'deepgram'."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "deepgram_listen_model",
+                "value": voice_defaults.DEEPGRAM_LISTEN_MODEL,
+                "description": (
+                    "Deepgram speech-to-text model for agent.listen (e.g. flux-general-en, "
+                    "a v2/Flux model -- assistant/voice/deepgram_provider.py always pairs this "
+                    "with version: 'v2'). Used only when voice/provider is 'deepgram'."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "deepgram_speak_model",
+                "value": voice_defaults.DEEPGRAM_SPEAK_MODEL,
+                "description": (
+                    "Deepgram text-to-speech model for agent.speak (an aura-*-en or "
+                    "flux-*-en voice). Used only when voice/provider is 'deepgram'."
                 ),
             },
         ]

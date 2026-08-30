@@ -29,6 +29,12 @@ fastapi>=0.115.0,<0.120.0
 uvicorn[standard]>=0.30.0,<0.35.0
 python-multipart>=0.0.9,<0.1.0
 
+# Deepgram Voice Agent API ephemeral-token minting (assistant/voice/
+# deepgram_provider.py) -- a single REST call (POST /v1/auth/grant), no
+# Deepgram SDK needed. Already an indirect dep of several packages above;
+# pinned explicitly since this is now a direct call site.
+requests>=2.31.0,<3.0.0
+
 # Persistence for user accounts, chat history + document library
 # (assistant/db.py). Separate from the Temporal Postgres instance in
 # docker-compose.yml (that one is Temporal's internal store, not
