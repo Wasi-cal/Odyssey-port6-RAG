@@ -62,14 +62,25 @@ export function Workspace() {
           <div className="relative flex min-h-0 flex-1">
             <div className="relative flex min-w-0 flex-1 flex-col">
               <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden px-8">
+                {/* key swap (hero <-> thread) + animate-fadeInUp gives the
+                    welcome/chat view switch the same soft entrance every
+                    other new-content moment in this app uses (message
+                    bubbles, the sources panel) instead of an instant,
+                    jarring pop -- bug #5's "make view switches smooth". */}
                 {showHero ? (
                   <HeroEmpty
+                    key="hero"
                     onPickSuggestion={d.sendMessage}
                     activeCategory={d.activeCategory}
                     onCategoryChange={d.setActiveCategory}
                   />
                 ) : (
-                  <DockedThread messages={d.messages} citeSources={d.citeSources} onOpenSource={d.openSource} />
+                  <DockedThread
+                    key={d.activeHistoryTitle ?? 'new'}
+                    messages={d.messages}
+                    citeSources={d.citeSources}
+                    onOpenSource={d.openSource}
+                  />
                 )}
               </div>
 
