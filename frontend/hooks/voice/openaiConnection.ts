@@ -1,0 +1,237 @@
+import * as api from '@/lib/api';
+import type { VoiceConnection, VoiceConnectionCallbacks } from './types';
+
+const OPENAI_REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
+
+/**
+ * Browser-to-OpenAI WebRTC connection to the Realtime API -- the original
+ * Phase 1 implementation, unchanged in behavior, just extracted out of
+ * useRealtimeVoice.ts so it can sit alongside deepgramConnection.ts behind
+ * the same VoiceConnection shape. The connection goes DIRECTLY from this
+ * browser to OpenAI (never proxied through our backend): only the
+ * ephemeral credential minted by POST /voice/session crosses our own
+ * server.
+ *
+ * The realtime model calls its one tool, search_policies, whenever it
+ * needs a grounded answer; this intercepts that function-call event, hits
+ * our own POST /voice/ask with the question, and feeds the real grounded
+ * answer back into the realtime session as the tool's output so the model
+ * speaks it. The committed message thread uses OUR answer text verbatim
+ * (not the model's own spoken transcript, which could paraphrase) so
+ * citations always match exactly what's shown.
+ */
+export async function connectOpenAI(
+  session: api.VoiceSessionResponse,
+  callbacks: VoiceConnectionCallbacks,
+): Promise<VoiceConnection> {
+  const { setStatus, setCaptionText, setSources, setError, getSessionId, onExchangeComplete } = callbacks;
+  const connection = session.connection as api.OpenAIVoiceConnection;
+
+  let pc: RTCPeerConnection | null = null;
+  let dc: RTCDataChannel | null = null;
+  let micStream: MediaStream | null = null;
+  let audioEl: HTMLAudioElement | null = null;
+
+  const cleanup = () => {
+    dc?.close();
+    dc = null;
+    pc?.close();
+    pc = null;
+    micStream?.getTracks().forEach((t) => t.stop());
+    micStream = null;
+    if (audioEl) {
+      audioEl.srcObject = null;
+      audioEl = null;
+    }
+  };
+
+  const handleFunctionCall = async (channel: RTCDataChannel, message: any) => {
+    if (message.name !== 'search_policies') return;
+    let question = '';
+    try {
+      question = JSON.parse(message.arguments || '{}').question || '';
+    } catch {
+      question = '';
+    }
+    if (!question) return;
+
+    console.log('[voice/openai] /voice/ask ->', question);
+    try {
+      const sid = await getSessionId();
+      const res = await api.voiceAsk(question, sid);
+      console.log('[voice/openai] /voice/ask <-', res.answer, res.sources);
+      setSources(res.sources);
+
+      channel.send(
+        JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: message.call_id,
+            output: JSON.stringify({ answer: res.answer }),
+          },
+        }),
+      );
+      channel.send(JSON.stringify({ type: 'response.create' }));
+
+      onExchangeComplete(question, { role: 'assistant', text: res.answer, sources: res.sources });
+    } catch (err) {
+      // Tell the model the lookup failed so it can say so out loud,
+      // instead of leaving the tool call hanging forever.
+      const detail = err instanceof Error ? err.message : 'Lookup failed.';
+      channel.send(
+        JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: message.call_id,
+            output: JSON.stringify({ error: detail }),
+          },
+        }),
+      );
+      channel.send(JSON.stringify({ type: 'response.create' }));
+      setError(detail);
+    }
+  };
+
+  const handleMessage = (channel: RTCDataChannel, event: MessageEvent) => {
+    let message: any;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+
+    switch (message.type) {
+      case 'session.created':
+        console.log('[voice/openai] session.created', message.session);
+        setStatus('listening');
+        // OpenAI's Realtime session never speaks on its own -- unlike
+        // Deepgram's dedicated agent.greeting field, there's no
+        // session-level "speak first" setting here, so the model only
+        // knows to greet first via its instructions (see api.py's
+        // _VOICE_SESSION_INSTRUCTIONS); this response.create is what
+        // actually triggers it to say that opening line now, before any
+        // user audio has arrived.
+        channel.send(JSON.stringify({ type: 'response.create' }));
+        break;
+
+      case 'input_audio_buffer.speech_started':
+        console.log('[voice/openai] speech_started');
+        setCaptionText('');
+        setSources([]);
+        setStatus('listening');
+        break;
+
+      case 'conversation.item.input_audio_transcription.completed':
+        console.log('[voice/openai] user transcript:', message.transcript);
+        if (message.transcript) setCaptionText(message.transcript);
+        break;
+
+      case 'response.function_call_arguments.done':
+        console.log('[voice/openai] tool call:', message.name, message.arguments);
+        handleFunctionCall(channel, message);
+        break;
+
+      case 'output_audio_buffer.started':
+        setStatus('speaking');
+        setCaptionText('');
+        break;
+
+      case 'response.output_audio_transcript.delta':
+        setCaptionText((prev) => prev + (message.delta || ''));
+        break;
+
+      case 'response.output_audio_transcript.done':
+        console.log('[voice/openai] assistant transcript:', message.transcript);
+        if (message.transcript) setCaptionText(message.transcript);
+        break;
+
+      case 'output_audio_buffer.stopped':
+        setStatus('listening');
+        break;
+
+      case 'error':
+        // OpenAI's Realtime 'error' events are often non-fatal (e.g. one
+        // rejected client event) and the session otherwise keeps running,
+        // so this doesn't force a disconnect -- but it must at least
+        // surface via setError, which it previously didn't (console-only),
+        // so a real failure here looked identical to no response at all.
+        // A truly dead connection is caught separately by
+        // pc.onconnectionstatechange below.
+        console.error('[voice/openai] server error event:', message.error);
+        setError(message.error?.message || 'Voice session error.');
+        break;
+
+      default:
+        break;
+    }
+  };
+
+  try {
+    console.log('[voice/openai] requesting microphone...');
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    console.log('[voice/openai] microphone granted, tracks:', micStream.getAudioTracks().length);
+  } catch (err) {
+    console.error('[voice/openai] getUserMedia failed:', err);
+    throw new Error('Microphone access is required for voice.');
+  }
+
+  try {
+    pc = new RTCPeerConnection();
+
+    // Without this, a dropped/failed connection left status stuck at
+    // 'listening'/'speaking' forever -- the mic toggle button
+    // (useDocAssist's onToggleListen) only calls connect() when status is
+    // 'idle', so pressing it again just called disconnect() on an
+    // already-dead session: exactly "doesn't respond at all".
+    pc.onconnectionstatechange = () => {
+      if (!pc) return;
+      console.log('[voice/openai] connection state:', pc.connectionState);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        setError('Voice connection lost.');
+        cleanup();
+        setStatus('idle');
+      }
+    };
+
+    audioEl = new Audio();
+    audioEl.autoplay = true;
+    pc.ontrack = (e) => {
+      if (audioEl) audioEl.srcObject = e.streams[0];
+    };
+
+    const [audioTrack] = micStream.getAudioTracks();
+    pc.addTrack(audioTrack, micStream);
+
+    dc = pc.createDataChannel('oai-events');
+    dc.addEventListener('message', (e) => handleMessage(dc!, e));
+
+    console.log('[voice/openai] creating local SDP offer...');
+    await pc.setLocalDescription();
+    console.log('[voice/openai] local SDP offer ready, length:', pc.localDescription?.sdp?.length);
+
+    console.log('[voice/openai] exchanging SDP with OpenAI...');
+    const response = await fetch(OPENAI_REALTIME_CALLS_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.credential}`,
+        'Content-Type': 'application/sdp',
+      },
+      body: pc.localDescription?.sdp,
+    });
+    console.log('[voice/openai] SDP exchange response status:', response.status);
+    if (!response.ok) {
+      const bodyText = await response.text();
+      throw new Error(`OpenAI Realtime connection failed (${response.status}): ${bodyText}`);
+    }
+    const answerSdp = await response.text();
+    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+    console.log('[voice/openai] WebRTC connected, peer connection state:', pc.connectionState, connection.model, connection.voice);
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+
+  return { disconnect: cleanup };
+}
