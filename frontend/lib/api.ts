@@ -220,6 +220,36 @@ export function uploadDocuments(files: File[]) {
   return request<UploadResponse>('/ingest', { method: 'POST', body: form });
 }
 
+// GET /documents/{filename} (backend/routers/documents.py) is a regular,
+// non-admin-gated endpoint (get_current_user, same as /library) -- it
+// already serves any logged-in user's own request for a document's raw
+// bytes, just with `Content-Disposition: inline` (meant for the existing
+// "open in a new tab to view" links). For a real download button (bug 6),
+// fetching the bytes ourselves with the Authorization header (rather than
+// a plain <a href>, which can't attach one) and handing them to the
+// browser as a blob works regardless of that inline disposition -- the
+// `download` attribute on the temporary anchor below is what actually
+// forces a save-as instead of a navigation.
+export async function downloadDocument(filename: string): Promise<void> {
+  const token = getToken();
+  const headers = new Headers();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const res = await fetch(`/api/documents/${encodeURIComponent(filename)}`, { headers });
+  if (!res.ok) throw new ApiError(res.status, res.statusText);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 // --- Admin ----------------------------------------------------------------
 // Every function here uses adminRequest (the separate admin JWT), never the
 // regular user token -- mirrors backend/api.py's get_current_admin split.
