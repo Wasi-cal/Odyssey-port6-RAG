@@ -55,6 +55,9 @@ export async function connectOpenAI(
     }
     if (!question) return;
 
+    // "thinking" -- the request is in flight (real event, not a timer):
+    // drives the orb's faster/larger rim wobble per the design spec.
+    setStatus('thinking');
     console.log('[voice/openai] /voice/ask ->', question);
     try {
       const sid = await getSessionId();
@@ -233,5 +236,11 @@ export async function connectOpenAI(
     throw err;
   }
 
-  return { disconnect: cleanup };
+  const setMuted = (muted: boolean) => {
+    micStream?.getAudioTracks().forEach((t) => {
+      t.enabled = !muted;
+    });
+  };
+
+  return { disconnect: cleanup, setMuted };
 }

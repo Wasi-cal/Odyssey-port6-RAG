@@ -9,7 +9,7 @@ export default function Page() {
 
   if (loading) {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-[#0B0F08] text-[#7C8A70]">
+      <div className="flex h-screen w-full items-center justify-center bg-[#fdfcff] text-[#7d7690]">
         Loading…
       </div>
     );

@@ -35,6 +35,7 @@ export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealti
   const [captionText, setCaptionText] = useState('');
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [muted, setMuted] = useState(false);
 
   const connectionRef = useRef<VoiceConnection | null>(null);
 
@@ -44,6 +45,7 @@ export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealti
     setStatus('idle');
     setCaptionText('');
     setSources([]);
+    setMuted(false);
   }, []);
 
   const disconnect = useCallback(() => {
@@ -74,5 +76,13 @@ export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealti
     }
   }, [getSessionId, onExchangeComplete, reset]);
 
-  return { status, captionText, sources, error, connect, disconnect };
+  const toggleMute = useCallback(() => {
+    setMuted((prev) => {
+      const next = !prev;
+      connectionRef.current?.setMuted?.(next);
+      return next;
+    });
+  }, []);
+
+  return { status, captionText, sources, error, muted, connect, disconnect, toggleMute };
 }

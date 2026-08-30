@@ -25,4 +25,7 @@ export interface VoiceConnectionCallbacks {
  * orchestrator hook holds onto once connect() resolves. */
 export interface VoiceConnection {
   disconnect: () => void;
+  /** Mutes/unmutes the outgoing mic track (real hardware mute, not just a
+   * UI flag) -- wired from the voice overlay's mute button. */
+  setMuted?: (muted: boolean) => void;
 }

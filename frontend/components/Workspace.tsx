@@ -2,15 +2,13 @@
 
 import { useDocAssist } from '@/hooks/useDocAssist';
 import { useAuth } from '@/lib/auth-context';
-import { Rail } from './Rail';
-import { TopBar } from './TopBar';
 import { Sidebar } from './Sidebar';
 import { SourcesPanel } from './SourcesPanel';
 import { SettingsModal } from './SettingsModal';
 import { Composer } from './Composer';
 import { HeroEmpty } from './HeroEmpty';
 import { DockedThread } from './DockedThread';
-import { VoiceScreen } from './VoiceScreen';
+import { VoiceOverlay } from './VoiceOverlay';
 import { GradientBackdrop } from './GradientBackdrop';
 
 export function Workspace() {
@@ -23,26 +21,8 @@ export function Workspace() {
 
   const initials = (username || '?').slice(0, 2).toUpperCase();
 
-  // Voice is a real full-screen view now (not an overlay on top of the
-  // thread) -- see redesign brief. Everything else (rail/sidebar/sources
-  // panel) is unmounted while it's active, same as the reference's
-  // dedicated voice screen.
-  if (voiceActive) {
-    return (
-      <VoiceScreen
-        voiceStatus={d.voiceStatus}
-        captionText={d.captionText}
-        sources={d.voiceSources}
-        onExit={d.toggleListen}
-        onToggleListen={d.toggleListen}
-        onOpenSettings={d.openSettings}
-        onOpenSource={d.openSource}
-      />
-    );
-  }
-
   return (
-    <div className="relative flex h-screen w-full overflow-hidden text-[#EDF2E6]">
+    <div className="relative flex h-screen w-full overflow-hidden text-[#211f2b]">
       <GradientBackdrop />
 
       <input
@@ -57,44 +37,34 @@ export function Workspace() {
         }}
       />
 
-      <div className="relative z-[1] flex h-full w-full font-sans">
-        <Rail
+      <div className="relative z-[1] flex h-full w-full">
+        <Sidebar
+          history={d.history}
+          activeSessionId={d.activeHistoryTitle}
           sourcesOpen={d.sourcesOpen}
+          username={username || ''}
+          userInitials={initials}
           onNewChat={d.newChat}
-          onChatClick={d.goChat}
-          onVoiceClick={d.toggleListen}
-          onSourcesClick={d.toggleSources}
-          onSettingsClick={d.openSettings}
+          onSelect={d.selectHistoryItem}
+          onPickShortcut={d.sendMessage}
+          onToggleSources={d.toggleSources}
+          onOpenSettings={d.openSettings}
+          onLogout={logout}
         />
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar companyName="Doc Assist" userInitials={initials} onLogout={logout} />
-
+        <main className="relative flex min-w-0 flex-1 flex-col">
           {d.error && (
-            <div className="border-b border-[#4A2318] bg-[#231310] px-7 py-2 text-[13px] text-[#F0A98C]">
+            <div className="border-b border-[rgba(224,69,90,0.18)] bg-[rgba(224,69,90,0.08)] px-8 py-2 text-[13px] text-[#c23a4d]">
               {d.error}
             </div>
           )}
 
           <div className="relative flex min-h-0 flex-1">
-            <Sidebar
-              history={d.history}
-              activeSessionId={d.activeHistoryTitle}
-              onNewChat={d.newChat}
-              onSelect={d.selectHistoryItem}
-            />
-
             <div className="relative flex min-w-0 flex-1 flex-col">
-              <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden px-8">
                 {showHero ? (
                   <HeroEmpty
-                    onToggleListen={d.toggleListen}
                     onPickSuggestion={d.sendMessage}
-                    uploadHint={d.uploading ? 'Uploading…' : 'Drop a policy doc here to upload'}
-                    onUpload={d.triggerUpload}
-                    inputValue={d.inputText}
-                    onInputChange={d.setInputText}
-                    onSend={d.onComposerSend}
                     activeCategory={d.activeCategory}
                     onCategoryChange={d.setActiveCategory}
                   />
@@ -103,17 +73,17 @@ export function Workspace() {
                 )}
               </div>
 
-              {!showHero && (
-                <div className="flex-shrink-0 px-8 pb-6 pt-4">
-                  <Composer
-                    value={d.inputText}
-                    onChange={d.setInputText}
-                    onSend={d.onComposerSend}
-                    onAttach={d.triggerUpload}
-                    disabled={d.sending}
-                  />
-                </div>
-              )}
+              <div className="flex-shrink-0 px-8 pb-6 pt-4">
+                <Composer
+                  value={d.inputText}
+                  onChange={d.setInputText}
+                  onSend={d.onComposerSend}
+                  onAttach={d.triggerUpload}
+                  onTalk={d.toggleListen}
+                  disabled={d.sending}
+                />
+                {d.uploading && <div className="mt-2 text-center text-[12px] text-[#9a93a8]">Uploading…</div>}
+              </div>
             </div>
 
             {d.sourcesOpen && (
@@ -126,7 +96,7 @@ export function Workspace() {
               />
             )}
           </div>
-        </div>
+        </main>
 
         <SettingsModal
           open={d.settingsOpen}
@@ -136,6 +106,18 @@ export function Workspace() {
           onStyleChange={d.setResponseStyle}
           onToggleCite={d.toggleCite}
         />
+
+        {voiceActive && (
+          <VoiceOverlay
+            voiceStatus={d.voiceStatus}
+            captionText={d.captionText}
+            sources={d.voiceSources}
+            muted={d.voiceMuted}
+            onToggleMute={d.toggleVoiceMute}
+            onClose={d.toggleListen}
+            onOpenSource={d.openSource}
+          />
+        )}
       </div>
     </div>
   );

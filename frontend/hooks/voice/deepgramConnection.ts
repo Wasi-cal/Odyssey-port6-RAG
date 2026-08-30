@@ -111,6 +111,9 @@ export async function connectDeepgram(
       }
       if (!question) continue;
 
+      // "thinking" -- the request is in flight (real event, not a timer):
+      // drives the orb's faster/larger rim wobble per the design spec.
+      setStatus('thinking');
       console.log('[voice/deepgram] /voice/ask ->', question);
       try {
         const sid = await getSessionId();
@@ -166,6 +169,7 @@ export async function connectDeepgram(
         break;
 
       case 'AgentThinking':
+        setStatus('thinking');
         break;
 
       case 'AgentStartedSpeaking':
@@ -266,5 +270,11 @@ export async function connectDeepgram(
     throw err;
   }
 
-  return { disconnect: cleanup };
+  const setMuted = (muted: boolean) => {
+    micStream?.getAudioTracks().forEach((t) => {
+      t.enabled = !muted;
+    });
+  };
+
+  return { disconnect: cleanup, setMuted };
 }

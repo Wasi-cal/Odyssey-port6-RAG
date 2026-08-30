@@ -57,27 +57,33 @@ export function MessageBubble({ message, citeSources, onOpenSource }: MessageBub
   const sources = citeSources ? message.sources ?? [] : [];
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`flex max-w-[560px] flex-col gap-1.5 ${isUser ? 'items-end' : 'items-start'}`}>
+    <div className={`animate-fadeInUp flex flex-col gap-1.5 px-8 ${isUser ? 'items-end' : 'items-start'}`}>
+      <span
+        className={`flex items-center gap-1 text-[10.5px] font-bold uppercase tracking-[0.07em] ${
+          isUser ? 'text-[#b7aec8]' : 'text-[#b7aec8]'
+        }`}
+      >
         {message.viaVoice && (
-          <span
-            className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#4E6A62] ${
-              isUser ? 'self-end' : 'self-start'
-            }`}
-          >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4" />
-            </svg>
-            Via voice
-          </span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4" />
+          </svg>
         )}
+        {isUser ? 'You' : 'Doc Assist'}
+      </span>
+
+      <div className={`flex max-w-[560px] flex-col gap-3 ${isUser ? 'items-end' : 'items-start'}`}>
         <div
-          className={`animate-fadeInUp rounded-2xl border px-4 py-3 text-[14.5px] leading-[1.55] ${
+          className={`px-4 py-3 text-[14.5px] leading-[1.55] text-[#2b2733] ${
             isUser
-              ? 'rounded-br-[4px] border-[#2FA98F]/30 bg-[#173832] text-[#EDF2E6]'
-              : 'rounded-bl-[4px] border-[#1B332D] bg-[#101E1B] text-[#EDF2E6]'
+              ? 'max-w-[520px] rounded-[16px_16px_4px_16px] bg-[#f4eef2]'
+              : 'max-w-[560px] rounded-[16px_16px_16px_4px] border border-[rgba(138,99,214,0.10)] px-[18px] py-[14px] leading-[1.6]'
           }`}
+          style={
+            isUser
+              ? undefined
+              : { background: 'linear-gradient(135deg,#faf1f8,#f1eefb)' }
+          }
         >
           <FormattedText text={message.text} />
         </div>

@@ -29,5 +29,5 @@ export interface HistoryGroup {
   items: SessionSummary[];
 }
 
-export type VoiceStatus = 'idle' | 'connecting' | 'listening' | 'speaking';
+export type VoiceStatus = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking';
 export type ResponseStyle = 'concise' | 'balanced' | 'detailed';

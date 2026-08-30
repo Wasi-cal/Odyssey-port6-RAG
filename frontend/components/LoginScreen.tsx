@@ -28,34 +28,37 @@ export function LoginScreen() {
   };
 
   return (
-    <div className="relative flex h-screen w-full items-center justify-center overflow-hidden font-sans text-[#EDF2E6]">
+    <div className="relative flex h-screen w-full items-center justify-center overflow-hidden font-sans text-[#211f2b]">
       <GradientBackdrop />
       <form
         onSubmit={submit}
-        className="relative z-[1] w-[380px] max-w-[90vw] rounded-[18px] border border-[#1B332D] bg-[#0F1B18] p-[30px] shadow-2xl"
+        className="relative z-[1] w-[380px] max-w-[90vw] rounded-[18px] border border-[rgba(30,20,45,0.08)] bg-white p-[30px] shadow-2xl"
       >
         <div className="mb-1 flex items-center gap-2">
-          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-[#8FEFDC] to-[#2FA98F] font-serif text-xl text-[#06201B]">
+          <div
+            className="flex h-9 w-9 items-center justify-center rounded-full text-[15px] font-bold text-white"
+            style={{ background: 'linear-gradient(135deg,#9b7fe0,#e79bd0)' }}
+          >
             D
           </div>
-          <span className="font-serif text-[22px] text-[#EDF2E6]">Doc Assist</span>
+          <span className="text-[20px] font-bold tracking-[-0.01em] text-[#211f2b]">Doc Assist</span>
         </div>
-        <div className="mb-6 text-[13px] text-[#5C7A72]">
+        <div className="mb-6 text-[13px] text-[#7d7690]">
           {mode === 'login' ? 'Sign in to your workspace.' : 'Create an account to get started.'}
         </div>
 
-        <label className="mb-3 block text-[13px] font-semibold text-[#B7CAC3]">
+        <label className="mb-3 block text-[13px] font-semibold text-[#433d55]">
           Username
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoFocus
             required
-            className="mt-1.5 w-full rounded-[10px] border border-[#1B332D] bg-[#101E1B] px-3 py-2.5 text-[14px] text-[#EDF2E6] outline-none focus:border-[#5EEAD4]"
+            className="mt-1.5 w-full rounded-[10px] border border-[rgba(30,20,45,0.10)] bg-[#fdfcff] px-3 py-2.5 text-[14px] text-[#211f2b] outline-none focus:border-[#6d4bb8]"
           />
         </label>
 
-        <label className="mb-4 block text-[13px] font-semibold text-[#B7CAC3]">
+        <label className="mb-4 block text-[13px] font-semibold text-[#433d55]">
           Password
           <input
             type="password"
@@ -63,16 +66,17 @@ export function LoginScreen() {
             onChange={(e) => setPassword(e.target.value)}
             required
             minLength={8}
-            className="mt-1.5 w-full rounded-[10px] border border-[#1B332D] bg-[#101E1B] px-3 py-2.5 text-[14px] text-[#EDF2E6] outline-none focus:border-[#5EEAD4]"
+            className="mt-1.5 w-full rounded-[10px] border border-[rgba(30,20,45,0.10)] bg-[#fdfcff] px-3 py-2.5 text-[14px] text-[#211f2b] outline-none focus:border-[#6d4bb8]"
           />
         </label>
 
-        {error && <div className="mb-4 text-[13px] text-[#F0A98C]">{error}</div>}
+        {error && <div className="mb-4 text-[13px] text-[#c23a4d]">{error}</div>}
 
         <button
           type="submit"
           disabled={busy}
-          className="w-full rounded-[10px] bg-[#5EEAD4] py-2.5 text-[14px] font-semibold text-[#06201B] transition-colors hover:bg-[#48D9C1] disabled:opacity-60"
+          className="w-full rounded-[10px] py-2.5 text-[14px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+          style={{ background: 'linear-gradient(135deg,#9b7fe0,#e79bd0)' }}
         >
           {busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
         </button>
@@ -83,7 +87,7 @@ export function LoginScreen() {
             setError(null);
             setMode((m) => (m === 'login' ? 'register' : 'login'));
           }}
-          className="mt-4 w-full text-center text-[13px] text-[#5C7A72] hover:text-[#5EEAD4]"
+          className="mt-4 w-full text-center text-[13px] text-[#7d7690] hover:text-[#6d4bb8]"
         >
           {mode === 'login' ? "Don't have an account? Register" : 'Already have an account? Sign in'}
         </button>
