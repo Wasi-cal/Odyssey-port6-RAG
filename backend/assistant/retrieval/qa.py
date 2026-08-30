@@ -27,6 +27,7 @@ from ..paths import DATA_DIR
 from .citations import dedupe_sources, extract_cited_docs, format_context
 from .prompt import (
     FALLBACK_ABUSE,
+    FALLBACK_ACKNOWLEDGEMENT,
     FALLBACK_DANGEROUS,
     FALLBACK_GIBBERISH,
     FALLBACK_GREETING,
@@ -367,6 +368,9 @@ def answer_question(
 
     system_prompt = config_store.get("generation", "system_prompt", SYSTEM_PROMPT)
     fallback_greeting = config_store.get("generation", "fallback_greeting", FALLBACK_GREETING)
+    fallback_acknowledgement = config_store.get(
+        "generation", "fallback_acknowledgement", FALLBACK_ACKNOWLEDGEMENT
+    )
     fallback_handoff = config_store.get("generation", "fallback_handoff", FALLBACK_HANDOFF)
     fallback_unclear = config_store.get("generation", "fallback_unclear", FALLBACK_UNCLEAR)
     fallback_gibberish = config_store.get("generation", "fallback_gibberish", FALLBACK_GIBBERISH)
@@ -395,6 +399,7 @@ def answer_question(
             chat_history,
             system_prompt,
             fallback_greeting,
+            fallback_acknowledgement,
             fallback_handoff,
             fallback_unclear,
             fallback_gibberish,
@@ -416,6 +421,7 @@ async def _run_moderation_and_generation(
     chat_history: list[dict] | None,
     system_prompt: str,
     fallback_greeting: str,
+    fallback_acknowledgement: str,
     fallback_handoff: str,
     fallback_unclear: str,
     fallback_gibberish: str,
@@ -446,6 +452,7 @@ async def _run_moderation_and_generation(
             chat_history,
             system_prompt,
             fallback_greeting,
+            fallback_acknowledgement,
             fallback_handoff,
             fallback_unclear,
             fallback_gibberish,
@@ -527,6 +534,7 @@ def _generate_answer(
     chat_history: list[dict] | None,
     system_prompt: str,
     fallback_greeting: str,
+    fallback_acknowledgement: str,
     fallback_handoff: str,
     fallback_unclear: str,
     fallback_gibberish: str,
@@ -601,6 +609,7 @@ def _generate_answer(
             "user_question": question,
             "previous_title": previous_title or _NO_PREVIOUS_TITLE,
             "fallback_greeting": fallback_greeting,
+            "fallback_acknowledgement": fallback_acknowledgement,
             "fallback_handoff": fallback_handoff,
             "fallback_unclear": fallback_unclear,
             "fallback_gibberish": fallback_gibberish,
@@ -626,6 +635,7 @@ def _generate_answer(
     # supported a claim.
     if answer_text in (
         fallback_greeting,
+        fallback_acknowledgement,
         fallback_handoff,
         fallback_gibberish,
         fallback_unclear,
@@ -703,6 +713,9 @@ def answer_question_voice(question: str, chat_history: list[dict] | None = None)
     require_openai_api_key()
 
     fallback_greeting = config_store.get("generation", "fallback_greeting", FALLBACK_GREETING)
+    fallback_acknowledgement = config_store.get(
+        "generation", "fallback_acknowledgement", FALLBACK_ACKNOWLEDGEMENT
+    )
     fallback_handoff = config_store.get("generation", "fallback_handoff", FALLBACK_HANDOFF)
     fallback_unclear = config_store.get("generation", "fallback_unclear", FALLBACK_UNCLEAR)
     fallback_gibberish = config_store.get("generation", "fallback_gibberish", FALLBACK_GIBBERISH)
@@ -722,6 +735,7 @@ def answer_question_voice(question: str, chat_history: list[dict] | None = None)
             question,
             chat_history,
             fallback_greeting,
+            fallback_acknowledgement,
             fallback_handoff,
             fallback_unclear,
             fallback_gibberish,
@@ -741,6 +755,7 @@ async def _run_moderation_and_generation_voice(
     question: str,
     chat_history: list[dict] | None,
     fallback_greeting: str,
+    fallback_acknowledgement: str,
     fallback_handoff: str,
     fallback_unclear: str,
     fallback_gibberish: str,
@@ -761,6 +776,7 @@ async def _run_moderation_and_generation_voice(
             question,
             chat_history,
             fallback_greeting,
+            fallback_acknowledgement,
             fallback_handoff,
             fallback_unclear,
             fallback_gibberish,
@@ -777,6 +793,7 @@ def _generate_voice_answer(
     question: str,
     chat_history: list[dict] | None,
     fallback_greeting: str,
+    fallback_acknowledgement: str,
     fallback_handoff: str,
     fallback_unclear: str,
     fallback_gibberish: str,
@@ -835,6 +852,7 @@ def _generate_voice_answer(
             "user_question": question,
             "previous_title": _NO_PREVIOUS_TITLE,
             "fallback_greeting": fallback_greeting,
+            "fallback_acknowledgement": fallback_acknowledgement,
             "fallback_handoff": fallback_handoff,
             "fallback_unclear": fallback_unclear,
             "fallback_gibberish": fallback_gibberish,
@@ -852,6 +870,7 @@ def _generate_voice_answer(
 
     if answer_text in (
         fallback_greeting,
+        fallback_acknowledgement,
         fallback_handoff,
         fallback_gibberish,
         fallback_unclear,

@@ -143,6 +143,7 @@ def seed_defaults() -> None:
     from .voice import defaults as voice_defaults
     from .retrieval.prompt import (
         FALLBACK_ABUSE,
+        FALLBACK_ACKNOWLEDGEMENT,
         FALLBACK_DANGEROUS,
         FALLBACK_GIBBERISH,
         FALLBACK_GREETING,
@@ -168,6 +169,17 @@ def seed_defaults() -> None:
                 "key": "fallback_greeting",
                 "value": FALLBACK_GREETING,
                 "description": "Returned for a greeting/thanks/small talk with no real question in it.",
+            },
+            {
+                "category": "generation",
+                "key": "fallback_acknowledgement",
+                "value": FALLBACK_ACKNOWLEDGEMENT,
+                "description": (
+                    "Returned for a greeting/thanks/small talk with no real question in it, "
+                    "same routing category as fallback_greeting, but used instead of it once a "
+                    "conversation is already underway -- prevents a short reply like 'great' or "
+                    "'thanks' mid-conversation from coming back as the cold-start self-introduction."
+                ),
             },
             {
                 "category": "generation",
@@ -442,6 +454,30 @@ def seed_defaults() -> None:
                 "description": (
                     "Deepgram text-to-speech model for agent.speak (an aura-*-en or "
                     "flux-*-en voice). Used only when voice/provider is 'deepgram'."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "deepgram_think_temperature",
+                "value": voice_defaults.DEEPGRAM_THINK_TEMPERATURE,
+                "description": (
+                    "Sampling temperature routers/voice.py's llm_proxy pins on every OpenAI "
+                    "chat-completions request it forwards for the Deepgram BYO-LLM think stage "
+                    "-- see assistant/voice/defaults.py's bug-fix note (#8, 'personality "
+                    "inconsistent every restart') for why this exists: Deepgram's own think "
+                    "request never carried a temperature at all, so the same persona "
+                    "instructions were being sampled at OpenAI's default (1.0). Used only when "
+                    "voice/provider is 'deepgram'."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "openai_temperature",
+                "value": voice_defaults.OPENAI_REALTIME_TEMPERATURE,
+                "description": (
+                    "Sampling temperature for the OpenAI Realtime session itself -- same "
+                    "bug-fix motivation as deepgram_think_temperature above. 0.6 is OpenAI's "
+                    "documented Realtime API minimum. Used only when voice/provider is 'openai'."
                 ),
             },
         ]
