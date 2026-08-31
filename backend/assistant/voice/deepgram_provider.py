@@ -128,6 +128,21 @@ class DeepgramVoiceProvider(RealtimeVoiceProvider):
 
         settings = {
             "type": "Settings",
+            # Explicit, unconditional opt-out of Deepgram's Model Improvement
+            # Partnership Program -- confirmed against Deepgram's docs
+            # (developers.deepgram.com/docs/the-deepgram-model-improvement-
+            # partnership-program) that customers are NOT auto-enrolled in
+            # that program (it requires a separate contractual opt-IN), so
+            # this deployment's voice audio was never used for model
+            # training even before this flag was added. Set anyway as a
+            # defense-in-depth guarantee, same reasoning as this file's
+            # other hardening: don't rely solely on "we were never enrolled
+            # in the first place" when a one-line, always-on flag makes it
+            # contractually explicit on every single session instead. Per
+            # Deepgram's docs this also shortens retention for this data to
+            # only as long as needed to process the request (no
+            # "fractional increments... for continued improvement" bucket).
+            "mip_opt_out": True,
             "audio": {
                 "input": {"encoding": "linear16", "sample_rate": 24000},
                 # sample_rate spelled out explicitly (rather than relying
