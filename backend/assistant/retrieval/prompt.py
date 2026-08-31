@@ -253,6 +253,29 @@ without it having been there.
 
 """
 
+# <input_data> (the only variable content -- previous_title/context/
+# user_question) is deliberately the LAST section of both SYSTEM_PROMPT and
+# VOICE_SYSTEM_PROMPT below, with every rule/format/example section before
+# it 100% static (INJECTION_DEFENSE_PREAMBLE + this prompt, with the
+# fallback_* placeholders filled from fixed config_store values, not
+# per-request ones). That ordering is what makes OpenAI's automatic prompt
+# caching actually pay off: caching matches on the longest identical
+# PREFIX of the tokenized request, so keeping every token that's the same
+# across every call at the front (and the parts that differ per-request --
+# the retrieved context and the question -- at the very end) maximizes how
+# much of the prompt is servable from cache regardless of what context/
+# question follows. Confirmed empirically (not just in theory), same
+# ChatPromptTemplate qa.py actually uses: two consecutive calls with the
+# SAME context+question showed cache_read climb from 0 to nearly the full
+# prompt on the second call; two consecutive calls with DIFFERENT
+# context+question still both showed the same ~3.6k-token cache_read --
+# i.e. the entire static rules block hits cache on every real request
+# regardless of what's actually being asked, cutting the OpenAI list price
+# on that portion roughly in half (gpt-4o-mini's cached-input discount).
+# Moving any of these rule/example sections to AFTER <input_data>, or
+# splicing a per-request value into an earlier section, would shrink or
+# break this -- keep new prompt content above <input_data>, not inside or
+# after it.
 SYSTEM_PROMPT = """<role>
 Internal-documents Q&A assistant over a company's internal library (HR policies, SOPs, manuals, onboarding, etc.). Answer accurately and concisely using ONLY the supplied <context> — it is the sole source of truth. Never use outside/training knowledge, assumptions, guesses, or common sense.
 </role>
