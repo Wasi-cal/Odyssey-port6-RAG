@@ -72,6 +72,13 @@ class RagResult:
 # naturally backtracks to the LAST "\nCitations:" in the string, which is
 # what we want -- the actual final citations line, not any citation-like
 # substring earlier in a multi-paragraph answer.
+#
+# Both patterns use .search (not .match): confirmed live that the model
+# occasionally prepends nothing extra but ALSO occasionally drops the
+# envelope entirely on a follow-up turn (see _split_title_and_answer's
+# docstring) -- .search means a well-formed envelope that isn't at position
+# 0 (e.g. the model emits one stray leading blank line or word) still
+# parses instead of falling all the way through to the leaky raw-text tier.
 _TITLE_ANSWER_CITATIONS_RE = re.compile(
     r"TITLE:\s*(.*?)\s*\nANSWER:\s*(.*)\nCitations:\s*(.*)", re.DOTALL
 )
@@ -80,6 +87,17 @@ _TITLE_ANSWER_CITATIONS_RE = re.compile(
 # Citations line entirely) from degrading all the way to "no title, show
 # the raw text," same graceful-degradation intent as before.
 _TITLE_ANSWER_RE = re.compile(r"TITLE:\s*(.*?)\s*\n+ANSWER:\s*(.*)", re.DOTALL)
+
+# Last-resort cleanup for the bottom fallback tier (neither regex above
+# matched at all -- confirmed live: the model sometimes emits bare prose
+# with a trailing "Citations: [n]" line and NO "TITLE:"/"ANSWER:" prefixes
+# whatsoever, especially on a follow-up turn after an earlier fallback
+# response in the same session -- see _split_title_and_answer's docstring).
+# Strips a trailing "Citations: ..." line (to end of string) so that even
+# this bottom tier never leaks the envelope's own scaffolding text into
+# what the user reads; the stripped part is still returned as citations_text
+# so callers that need it (the voice path) still get it.
+_TRAILING_CITATIONS_RE = re.compile(r"\n+Citations:\s*(.*)\Z", re.IGNORECASE | re.DOTALL)
 
 # Status text handed to the model as the <previous_title> input on a
 # session's first message (see the invoke() call below) -- title_rules in
@@ -130,9 +148,9 @@ def _build_history_messages(chat_history: list[dict] | None) -> list:
     return messages
 
 
-def _split_title_and_answer(raw_text: str) -> tuple[str | None, str, str]:
+def _split_title_and_answer(raw_text: str) -> tuple[str | None, str, str, bool]:
     """Splits the model's "TITLE: ...\\nANSWER: ...\\nCitations: ..." envelope
-    into (title, answer, citations_text).
+    into (title, answer, citations_text, envelope_ok).
 
     _generate_answer (text path) ignores citations_text and calls
     extract_cited_docs on the answer body instead -- SYSTEM_PROMPT wants
@@ -152,24 +170,56 @@ def _split_title_and_answer(raw_text: str) -> tuple[str | None, str, str]:
 
     Tries the three-group TITLE/ANSWER/Citations shape first, falls back to
     the older two-group TITLE/ANSWER shape (no Citations line, citations_text
-    empty) if that doesn't match, and only falls back to (None, raw_text, "")
-    if neither does -- three levels of graceful degradation so a formatting
+    empty) if that doesn't match, and only falls back to a raw-text tier if
+    neither does -- three levels of graceful degradation so a formatting
     slip never shows the user a garbled "TITLE: ..." response.
+
+    Confirmed live (reproducible, not rare): on a follow-up turn -- most
+    reliably right after an earlier turn in the same session got a fixed
+    fallback response -- the model sometimes drops the TITLE:/ANSWER:
+    prefixes ENTIRELY and just emits the bare answer prose with a trailing
+    "Citations: [n]" line, no envelope at all. The old bottom tier
+    (`return None, raw_text, ""`) returned that whole raw completion,
+    trailing "Citations: [n]" line and all, as the user-visible answer --
+    a real, observed leak, not a hypothetical one. This tier now also
+    strips a trailing "Citations: ..." line (if present) off raw_text
+    before returning it as the answer, mirroring the citations_text split
+    the two structured tiers above already do, so a missing envelope
+    degrades to "no title, plain answer text" instead of "no title, answer
+    text plus leaked scaffolding."
+
+    `envelope_ok` is True only when one of the two structured (TITLE:/
+    ANSWER:) shapes actually matched -- callers use it to decide whether a
+    retry is worth attempting (see _generate_with_envelope_retry) instead of
+    inferring "did the envelope parse" indirectly from title being None
+    (title can legitimately be None even with a well-formed envelope, e.g.
+    the model echoes back the previous_title sentinel).
     """
     raw_text = raw_text.strip()
-    match = _TITLE_ANSWER_CITATIONS_RE.match(raw_text)
+    # .search, not .match: a well-formed envelope that isn't at position 0
+    # (e.g. the model emits a stray leading blank line or word before
+    # "TITLE:") still parses instead of falling through to the raw-text
+    # tier below.
+    match = _TITLE_ANSWER_CITATIONS_RE.search(raw_text)
     if match:
         title, answer, citations_text = match.groups()
     else:
-        match = _TITLE_ANSWER_RE.match(raw_text)
+        match = _TITLE_ANSWER_RE.search(raw_text)
         if not match:
-            return None, raw_text, ""
+            trailing = _TRAILING_CITATIONS_RE.search(raw_text)
+            if trailing:
+                answer = raw_text[: trailing.start()].strip()
+                citations_text = trailing.group(1).strip()
+            else:
+                answer = raw_text
+                citations_text = ""
+            return None, answer, citations_text, False
         title, answer = match.groups()
         citations_text = ""
     title = title.strip()
     if not title or title == _NO_PREVIOUS_TITLE:
         title = None
-    return title, answer.strip(), citations_text.strip()
+    return title, answer.strip(), citations_text.strip(), True
 
 
 def _list_documents_answer() -> str:
@@ -528,6 +578,54 @@ def _inject_leave_ceiling_advisory(docs: list[Document], question: str) -> list[
     return docs
 
 
+_ENVELOPE_RETRY_REMINDER = (
+    "\n\n(Reminder: your entire reply must start with \"TITLE:\", followed by "
+    "\"ANSWER:\", followed by \"Citations:\", in that exact order and with "
+    "nothing before TITLE or after Citations. Do not omit this format.)"
+)
+
+
+def _generate_with_envelope_retry(chain, invoke_args: dict):
+    """Invokes `chain` once; if the model dropped the TITLE:/ANSWER:/
+    Citations: envelope entirely (see _split_title_and_answer's envelope_ok
+    return), retries ONCE with a short reminder appended to the question
+    before giving up and returning the original (still leak-safe, thanks to
+    _split_title_and_answer's own bottom-tier stripping) response.
+
+    Generation runs at temperature=0 with a fixed seed (see the ChatOpenAI
+    construction above) specifically for reproducible, non-drifting answers
+    -- confirmed live that this makes the failure itself highly reproducible
+    too: the same question, against the same prior turns, drops the
+    envelope the same way every time. A bare identical retry (same prompt,
+    same invoke_args) would therefore just reproduce the exact same broken
+    completion -- pointless. Appending _ENVELOPE_RETRY_REMINDER perturbs the
+    prompt just enough to give the model an actual second chance instead of
+    guaranteed-repeating the failure, without touching the config-editable
+    system_prompt itself (this is a one-off, code-level nudge, not a
+    permanent prompt change).
+
+    Only retries when the envelope is missing outright -- a response that
+    parsed fine but genuinely has no title change (or a fallback answer) is
+    never retried, since that's correct model output, not a formatting
+    failure. Costs one extra LLM round-trip only on the failure path, never
+    on a normal turn.
+    """
+    response = chain.invoke(invoke_args)
+    title, answer, citations, envelope_ok = _split_title_and_answer(response.content)
+    if envelope_ok:
+        return response, title, answer, citations
+
+    retry_args = dict(invoke_args)
+    retry_args["user_question"] = invoke_args["user_question"] + _ENVELOPE_RETRY_REMINDER
+    retry_response = chain.invoke(retry_args)
+    retry_title, retry_answer, retry_citations, retry_ok = _split_title_and_answer(
+        retry_response.content
+    )
+    if retry_ok:
+        return retry_response, retry_title, retry_answer, retry_citations
+    return response, title, answer, citations
+
+
 def _generate_answer(
     question: str,
     previous_title: str | None,
@@ -602,7 +700,8 @@ def _generate_answer(
     # both what the model is told to say AND what this function compares
     # its output against below -- editing one without the other would
     # otherwise silently break the fallback-detection check.
-    response = chain.invoke(
+    response, title, answer_text, _citations_text = _generate_with_envelope_retry(
+        chain,
         {
             "chat_history": history_messages,
             "context": context,
@@ -616,9 +715,8 @@ def _generate_answer(
             "fallback_unrelated": fallback_unrelated,
             "fallback_unanswered": fallback_unanswered,
             "fallback_dangerous": fallback_dangerous,
-        }
+        },
     )
-    title, answer_text, _citations_text = _split_title_and_answer(response.content)
 
     # LangChain's ChatOpenAI populates usage_metadata on every AIMessage --
     # a standardized {"input_tokens", "output_tokens", "total_tokens"} dict,
@@ -845,7 +943,8 @@ def _generate_voice_answer(
     )
     chain = prompt | llm
 
-    response = chain.invoke(
+    response, title, answer_text, citations_text = _generate_with_envelope_retry(
+        chain,
         {
             "chat_history": history_messages,
             "context": context,
@@ -859,9 +958,8 @@ def _generate_voice_answer(
             "fallback_unrelated": fallback_unrelated,
             "fallback_unanswered": fallback_unanswered,
             "fallback_dangerous": fallback_dangerous,
-        }
+        },
     )
-    title, answer_text, citations_text = _split_title_and_answer(response.content)
 
     usage = getattr(response, "usage_metadata", None) or {}
     prompt_tokens = usage.get("input_tokens")
