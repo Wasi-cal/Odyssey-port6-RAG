@@ -9,19 +9,20 @@ interface VoiceOrbProps {
 }
 
 /**
- * Voice orb, take 3 -- a smooth glowing gradient blob instead of the
- * earlier pixelated particle-field version. Fills its container (sized by
- * VoiceOverlay.tsx) rather than a fixed internal resolution, redrawn on
- * resize via ResizeObserver, and rendered at devicePixelRatio for crisp
- * edges instead of the old canvas's deliberate pixelation.
+ * Voice visualizer, take 4 -- deliberately NOT an orb/blob this time (see
+ * git history for takes 1-3). Current-generation voice assistants
+ * (Apple's post-2024 Siri, Google's Gemini Live) have largely moved away
+ * from a single glowing sphere toward a glowing ring / audio-reactive
+ * waveform instead -- this is a radial bar equalizer: a ring of glowing
+ * bars around a center point, each pulsing independently (layered sine
+ * waves with per-bar phase/frequency offsets, since we have no real
+ * amplitude data to react to -- state is the only real signal, from the
+ * actual realtime voice pipeline, see hooks/useRealtimeVoice.ts), plus a
+ * soft ambient glow and a small breathing center dot so it still reads as
+ * one cohesive object, not just loose bars.
  *
- * Built from three soft, blurred, overlapping circles (a "lava lamp"
- * blob) drifting and breathing at a state-dependent amplitude/speed, plus
- * a bright core and a thin outer ring. No audio-level input is wired up
- * (state is the only real signal we have -- listening/thinking/speaking
- * come from the actual realtime voice pipeline, see
- * hooks/useRealtimeVoice.ts) -- motion is state-driven, not amplitude-
- * driven, same as the previous implementation.
+ * Same public interface (OrbState, VoiceOrb({state})) as the previous
+ * takes, so VoiceOverlay.tsx needs no changes.
  */
 export function VoiceOrb({ state }: VoiceOrbProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -51,15 +52,26 @@ export function VoiceOrb({ state }: VoiceOrbProps) {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
-    // Per-state motion profile: `breathe` is how much the overall blob
-    // scales in/out, `drift` is how far the inner blobs wander from
-    // center, `speed` scales every sine's time coefficient (higher =
-    // faster/busier motion), `glow` is the outer glow's blur radius as a
-    // fraction of the orb radius.
-    const PROFILES: Record<OrbState, { breathe: number; drift: number; speed: number; glow: number }> = {
-      listening: { breathe: 0.05, drift: 0.14, speed: 0.6, glow: 0.35 },
-      thinking: { breathe: 0.08, drift: 0.22, speed: 1.6, glow: 0.5 },
-      speaking: { breathe: 0.16, drift: 0.1, speed: 2.6, glow: 0.65 },
+    const BAR_COUNT = 48;
+    // Per-bar random phase/frequency so bars don't all move in lockstep
+    // (that would read as a single pulsing ring, not a "listening" ring of
+    // independent bars) -- generated once, stable for the component's
+    // lifetime.
+    const bars = Array.from({ length: BAR_COUNT }, () => ({
+      phase: Math.random() * Math.PI * 2,
+      freq: 0.6 + Math.random() * 0.8,
+    }));
+
+    // Per-state motion profile: `base`/`amp` are the bar length's resting
+    // length and how much it pulses (as a fraction of the ring radius),
+    // `speed` scales every sine's time coefficient, `spin` slowly rotates
+    // the whole ring (a static ring of bars reads as inert; a slow spin
+    // keeps it feeling alive even at rest), `hueShift` pushes the gradient
+    // further toward pink for more "active" states.
+    const PROFILES: Record<OrbState, { base: number; amp: number; speed: number; spin: number; hueShift: number }> = {
+      listening: { base: 0.25, amp: 0.12, speed: 0.9, spin: 0.06, hueShift: 0 },
+      thinking: { base: 0.28, amp: 0.22, speed: 2.2, spin: 0.22, hueShift: 0.3 },
+      speaking: { base: 0.32, amp: 0.38, speed: 3.4, spin: 0.02, hueShift: 0.6 },
     };
 
     const start = performance.now();
@@ -72,69 +84,57 @@ export function VoiceOrb({ state }: VoiceOrbProps) {
 
       const cx = width / 2;
       const cy = height / 2;
-      const baseR = Math.min(width, height) * 0.28;
-      const breathe = 1 + p.breathe * Math.sin(t * p.speed);
-      const r = baseR * breathe;
+      const R = Math.min(width, height) * 0.5;
+      const innerR = R * 0.42;
+      const spinAngle = t * p.spin;
 
-      // Outer soft glow -- a large, heavily blurred radial wash behind
-      // everything, pulsing a bit slower/wider than the core blob so it
-      // reads as ambient light rather than a hard edge.
-      const glowR = r * (1.8 + 0.15 * Math.sin(t * p.speed * 0.7));
+      // Ambient glow wash behind the ring, breathing slowly.
+      const glowR = R * (0.95 + 0.05 * Math.sin(t * p.speed * 0.4));
       const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
-      glow.addColorStop(0, `rgba(155, 127, 224, ${0.35 * p.glow + 0.15})`);
-      glow.addColorStop(0.6, 'rgba(231, 155, 208, 0.12)');
+      glow.addColorStop(0, `rgba(155, 127, 224, ${0.22 + 0.1 * p.hueShift})`);
       glow.addColorStop(1, 'rgba(231, 155, 208, 0)');
       ctx.fillStyle = glow;
       ctx.beginPath();
       ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
       ctx.fill();
 
-      // Three overlapping blobs (screen-blended) drifting on independent
-      // orbits -- this is what gives the "lava lamp" liveliness instead of
-      // a single static circle. Each blob is itself a radial gradient
-      // (bright center fading to transparent) so overlaps brighten
-      // naturally rather than showing hard seams.
-      ctx.globalCompositeOperation = 'screen';
-      const blobs = [
-        { hue: [155, 127, 224] as const, a: t * p.speed * 0.9, phase: 0 },
-        { hue: [231, 155, 208] as const, a: t * p.speed * 1.1, phase: (Math.PI * 2) / 3 },
-        { hue: [109, 75, 184] as const, a: t * p.speed * 0.75, phase: (Math.PI * 4) / 3 },
-      ];
-      for (const b of blobs) {
-        const angle = b.a + b.phase;
-        const dist = r * p.drift * (0.6 + 0.4 * Math.sin(t * p.speed * 0.5 + b.phase));
-        const bx = cx + Math.cos(angle) * dist;
-        const by = cy + Math.sin(angle) * dist;
-        const br = r * 0.75;
-        const [red, green, blue] = b.hue;
-        const grad = ctx.createRadialGradient(bx, by, 0, bx, by, br);
-        grad.addColorStop(0, `rgba(${red}, ${green}, ${blue}, 0.9)`);
-        grad.addColorStop(1, `rgba(${red}, ${green}, ${blue}, 0)`);
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(bx, by, br, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.globalCompositeOperation = 'source-over';
+      // The bars themselves -- each a short gradient-colored, rounded
+      // stroke radiating outward from innerR, length modulated by two
+      // summed sines (its own phase/freq plus a shared time base) so
+      // neighboring bars move somewhat together (a "wave" traveling
+      // around the ring) without being perfectly synchronized.
+      ctx.lineCap = 'round';
+      for (let i = 0; i < BAR_COUNT; i++) {
+        const b = bars[i];
+        const angle = (i / BAR_COUNT) * Math.PI * 2 + spinAngle;
+        const wave =
+          Math.sin(t * p.speed * b.freq + b.phase) * 0.6 + Math.sin(t * p.speed * 0.5 + angle * 3) * 0.4;
+        const len = R * (p.base + p.amp * Math.max(0, wave));
 
-      // Bright core -- a small, mostly-opaque highlight near center so the
-      // orb reads as one cohesive object with a "light source" rather than
-      // three loose blobs, plus a thin ring tracing the orb's nominal
-      // radius for definition against the blurred glow.
-      const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 0.55);
-      core.addColorStop(0, 'rgba(255, 255, 255, 0.85)');
-      core.addColorStop(0.4, 'rgba(219, 199, 245, 0.55)');
+        const x1 = cx + Math.cos(angle) * innerR;
+        const y1 = cy + Math.sin(angle) * innerR;
+        const x2 = cx + Math.cos(angle) * (innerR + len);
+        const y2 = cy + Math.sin(angle) * (innerR + len);
+
+        const hue = 265 + p.hueShift * 40 * Math.sin(angle + t * 0.3);
+        ctx.strokeStyle = `hsla(${hue}, 70%, 72%, ${0.55 + 0.35 * Math.max(0, wave)})`;
+        ctx.lineWidth = Math.max(2, R * 0.028);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+
+      // Small breathing center dot -- ties the ring together as one
+      // object and gives "thinking"/"speaking" a focal point.
+      const dotR = innerR * (0.4 + 0.08 * Math.sin(t * p.speed * 1.3));
+      const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, dotR);
+      core.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
       core.addColorStop(1, 'rgba(219, 199, 245, 0)');
       ctx.fillStyle = core;
       ctx.beginPath();
-      ctx.arc(cx, cy, r * 0.55, 0, Math.PI * 2);
+      ctx.arc(cx, cy, dotR, 0, Math.PI * 2);
       ctx.fill();
-
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
-      ctx.lineWidth = Math.max(1, r * 0.015);
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.stroke();
 
       raf = requestAnimationFrame(draw);
     };
