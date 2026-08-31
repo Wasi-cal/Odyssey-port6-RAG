@@ -49,6 +49,12 @@ export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealti
   }, []);
 
   const disconnect = useCallback(() => {
+    // Clears any error left over from THIS call (not folded into reset()
+    // itself, since reset() is also called from connect()'s failure path
+    // immediately after setError() there -- clearing it there would wipe
+    // the very error just set) so a stale message can't linger into the
+    // next call.
+    setError(null);
     reset();
   }, [reset]);
 

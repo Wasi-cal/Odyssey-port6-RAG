@@ -206,22 +206,46 @@ export async function connectOpenAI(
         assistantAudioActive = false;
         break;
 
-      case 'error':
+      case 'error': {
         // OpenAI's Realtime 'error' events are often non-fatal (e.g. one
         // rejected client event) and the session otherwise keeps running,
         // so this doesn't force a disconnect -- but it must at least
         // surface via setError, which it previously didn't (console-only),
         // so a real failure here looked identical to no response at all.
         // A truly dead connection is caught separately by
-        // pc.onconnectionstatechange below. Exception: if the user already
-        // hung up on purpose, see userInitiatedDisconnect's comment above.
+        // pc.onconnectionstatechange below.
+        const errMsg: string = message.error?.message || '';
+
+        // Live-reported repeatedly (three separate occurrences, different
+        // numbers each time: "Audio content of 15000ms is already shorter
+        // than 16500ms", then 6300/6620, then 7950/8140) -- always
+        // surfaces AFTER the call already ended, never during. The
+        // shorter/longer ratio isn't constant across occurrences (1.10x,
+        // 1.05x, 1.02x), which rules out a fixed cause like our own
+        // speed:0.9/0.8 playback-rate setting (that would produce a
+        // constant ratio) -- this looks like an inherent, benign
+        // duration-accounting message OpenAI's server emits internally
+        // around response truncation/interruption bookkeeping, unrelated
+        // to anything actually going wrong in the conversation (the
+        // exchange itself always completed fine). Purely cosmetic and not
+        // actionable by the user, so suppress this specific message class
+        // unconditionally rather than only around hangup timing -- if it
+        // ever turns out to correlate with an actual broken exchange,
+        // narrow this back down instead of removing it outright.
+        if (/audio content of .*is already shorter than/i.test(errMsg)) {
+          console.warn('[voice/openai] benign server duration-accounting error, suppressed:', message.error);
+          break;
+        }
+        // Anything else: if the user already hung up on purpose, see
+        // userInitiatedDisconnect's comment above.
         if (userInitiatedDisconnect) {
           console.warn('[voice/openai] server error event after intentional hangup, suppressed:', message.error);
           break;
         }
         console.error('[voice/openai] server error event:', message.error);
-        setError(message.error?.message || 'Voice session error.');
+        setError(errMsg || 'Voice session error.');
         break;
+      }
 
       default:
         break;
