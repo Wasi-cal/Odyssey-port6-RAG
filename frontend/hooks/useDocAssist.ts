@@ -92,11 +92,6 @@ function docMeta(d: api.DocumentInfo): string {
   return `${d.chunk_count} chunk${d.chunk_count === 1 ? '' : 's'}${dateStr ? ` · Updated ${dateStr}` : ''}`;
 }
 
-export const SHORTCUT_PROMPTS = [
-  { icon: 'search', title: 'Search Policies', q: 'What policies do you have?' },
-  { icon: 'leave', title: 'Check Leave Balance', q: 'How many leave days do I have left this year?' },
-];
-
 export const PROMPT_CATEGORIES = ['Leave', 'Payroll', 'Travel', 'IT & Security'] as const;
 
 export const CATEGORY_PROMPTS: Record<(typeof PROMPT_CATEGORIES)[number], { title: string; q: string }[]> = {

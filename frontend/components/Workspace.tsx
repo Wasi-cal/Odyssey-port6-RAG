@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { useDocAssist } from '@/hooks/useDocAssist';
 import { useAuth } from '@/lib/auth-context';
 import { Sidebar } from './Sidebar';
@@ -11,6 +12,8 @@ import { DockedThread } from './DockedThread';
 import { VoiceOverlay } from './VoiceOverlay';
 import { GradientBackdrop } from './GradientBackdrop';
 
+const SIDEBAR_COLLAPSED_KEY = 'docassist.sidebarCollapsed';
+
 export function Workspace() {
   const d = useDocAssist();
   const { username, logout } = useAuth();
@@ -20,6 +23,26 @@ export function Workspace() {
   const showHero = !hasMessages;
 
   const initials = (username || '?').slice(0, 2).toUpperCase();
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      setSidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1');
+    } catch {
+      // localStorage unavailable (private browsing, etc.) -- default expanded.
+    }
+  }, []);
+  const toggleSidebarCollapsed = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {
+        // Best-effort; the preference just won't survive a reload.
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="relative flex h-screen w-full overflow-hidden text-[#211f2b]">
@@ -44,11 +67,12 @@ export function Workspace() {
           sourcesOpen={d.sourcesOpen}
           username={username || ''}
           userInitials={initials}
+          collapsed={sidebarCollapsed}
           onNewChat={d.newChat}
           onSelect={d.selectHistoryItem}
-          onPickShortcut={d.sendMessage}
           onToggleSources={d.toggleSources}
           onOpenSettings={d.openSettings}
+          onToggleCollapsed={toggleSidebarCollapsed}
           onLogout={logout}
         />
 
