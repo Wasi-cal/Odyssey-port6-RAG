@@ -77,11 +77,12 @@ export function Workspace() {
         />
 
         <main className="relative flex min-w-0 flex-1 flex-col">
-          {d.error && (
-            <div className="border-b border-[rgba(224,69,90,0.18)] bg-[rgba(224,69,90,0.08)] px-8 py-2 text-[13px] text-[#c23a4d]">
-              {d.error}
-            </div>
-          )}
+          {/* Errors are logged to the console (see useDocAssist.ts's
+              catch blocks and the voice.error effect), not surfaced as a
+              UI banner here anymore -- per request, they were noisy/non-
+              actionable for the user (benign server-side voice messages,
+              self-resolving races, etc.) more often than genuinely
+              needing attention. */}
 
           <div className="relative flex min-h-0 flex-1">
             <div className="relative flex min-w-0 flex-1 flex-col">

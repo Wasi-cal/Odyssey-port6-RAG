@@ -285,6 +285,7 @@ export function useDocAssist() {
         const reply = await askBackend(text);
         setMessages((m) => [...m, reply]);
       } catch (err) {
+        console.error('[chat] sendMessage failed:', err);
         setError(err instanceof Error ? err.message : 'Failed to reach Doc Assist.');
         setMessages((m) => m.slice(0, -1));
       } finally {
@@ -311,7 +312,10 @@ export function useDocAssist() {
   const voice = useRealtimeVoice({ getSessionId: ensureSession, onExchangeComplete: onVoiceExchangeComplete });
 
   useEffect(() => {
-    if (voice.error) setError(voice.error);
+    // Logged, not surfaced as a UI banner -- voice errors were confirmed
+    // repeatedly noisy/non-actionable (benign server-side messages,
+    // races that self-resolve, etc.), console is where they're useful.
+    if (voice.error) console.error('[voice] error:', voice.error);
   }, [voice.error]);
 
   const newChat = useCallback(() => {
@@ -378,6 +382,7 @@ export function useDocAssist() {
         await api.uploadDocuments(list);
         refreshLibrary();
       } catch (err) {
+        console.error('[documents] upload failed:', err);
         setError(err instanceof Error ? err.message : 'Upload failed.');
       } finally {
         setUploading(false);
