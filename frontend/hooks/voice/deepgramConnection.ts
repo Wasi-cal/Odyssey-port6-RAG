@@ -173,12 +173,23 @@ export async function connectDeepgram(
         break;
 
       case 'AgentStartedSpeaking':
+        // Deliberately does NOT clear the caption here: ConversationText
+        // for the agent's own turn (see above) carries the full spoken
+        // text and is confirmed live to arrive at essentially the same
+        // moment as this event -- sometimes a beat before it, since
+        // Deepgram needs the complete text before TTS synthesis can even
+        // start. Clearing the caption here used to wipe out that
+        // just-set text almost immediately, which read as the subtitle
+        // flashing and disappearing before (or as) the agent actually
+        // started speaking. The caption now persists for the whole
+        // AgentStartedSpeaking -> AgentAudioDone window and is cleared
+        // there instead, once the agent has actually finished talking.
         setStatus('speaking');
-        setCaptionText('');
         break;
 
       case 'AgentAudioDone':
         setStatus('listening');
+        setCaptionText('');
         break;
 
       case 'FunctionCallRequest':

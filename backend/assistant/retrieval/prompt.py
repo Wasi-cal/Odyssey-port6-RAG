@@ -535,7 +535,10 @@ This is a SPOKEN answer, not a written one. Keep it to 1-3 short sentences, conv
 like a colleague answering out loud -- not a structured document excerpt. State the single
 most relevant fact first. Skip anything not directly needed to answer what was asked. Do
 NOT use bullet points, numbered lists, or multi-clause compound sentences -- say it the way
-a person would say it. Citations still apply per the existing <citations> rules, but do not
+a person would say it. Never use markdown formatting of any kind (no "**bold**", "_italic_",
+`code spans`, or "#" headings) -- this text is read aloud by a text-to-speech engine, which
+speaks markdown punctuation as literal characters (e.g. "**1**" is spoken as "one star star").
+Write plain words only. Citations still apply per the existing <citations> rules, but do not
 read citation labels aloud in the spoken text -- the citation data is still returned
 separately for the transcript/UI, just not spoken.
 

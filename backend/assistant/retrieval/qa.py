@@ -787,6 +787,25 @@ def _generate_answer(
 # this path, not a knob shared with (or capable of drifting) answer_question()'s.
 VOICE_RETRIEVAL_K = 6
 
+# Confirmed live: a spoken answer occasionally comes back with markdown
+# emphasis (most often "**<value>**" around a number or short phrase) even
+# though VOICE_SYSTEM_PROMPT's <voice_response_style> already forbids
+# bullets/lists/citation-label-reading -- it never told the model not to
+# use markdown emphasis at all, so a stray "**1**" gets relayed through
+# Deepgram's think stage into TTS and spoken as literal asterisk
+# characters ("one star star"). Same reasoning as _split_title_and_answer's
+# hardening elsewhere in this file: don't rely solely on the model
+# following a prompt instruction for something this easy to guarantee in
+# code instead. Strips markdown emphasis/heading/code-span markers
+# (*, _, `, and a leading "#") from the spoken answer text only -- the
+# text-chat path's _generate_answer never calls this, since markdown
+# rendering is fine (desired, even) in the on-screen chat UI.
+_VOICE_MARKDOWN_RE = re.compile(r"[*_`]|^#+\s*", re.MULTILINE)
+
+
+def _strip_voice_markdown(text: str) -> str:
+    return _VOICE_MARKDOWN_RE.sub("", text)
+
 
 def answer_question_voice(question: str, chat_history: list[dict] | None = None) -> RagResult:
     """Voice counterpart to answer_question() -- same RagResult shape
@@ -960,6 +979,10 @@ def _generate_voice_answer(
             "fallback_dangerous": fallback_dangerous,
         },
     )
+    # See _strip_voice_markdown's docstring above -- fallback strings never
+    # contain markdown characters, so this never affects the equality check
+    # just below.
+    answer_text = _strip_voice_markdown(answer_text)
 
     usage = getattr(response, "usage_metadata", None) or {}
     prompt_tokens = usage.get("input_tokens")
