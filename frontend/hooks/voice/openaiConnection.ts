@@ -78,6 +78,28 @@ export async function connectOpenAI(
   // banner right after a clean hangup.
   let userInitiatedDisconnect = false;
 
+  // Tracks whether a response is currently active (between the server's
+  // response.created and response.done events) -- guards against "Conversation
+  // already has an active response in progress" (confirmed live), which
+  // happens whenever our own response.create (sent after a search_policies
+  // tool result, success or failure, or the initial greeting trigger)
+  // races the server's OWN automatic response.create (default VAD/
+  // turn_detection auto-responds when it detects end-of-speech). Rather
+  // than just letting that send fail (which would silently drop the tool
+  // result -- the model would never actually speak the answer it just
+  // looked up), requestResponse() queues it instead and response.done's
+  // handler flushes the queued one the moment the active response
+  // actually finishes.
+  let responseActive = false;
+  let pendingResponseCreate = false;
+  const requestResponse = (channel: RTCDataChannel) => {
+    if (responseActive) {
+      pendingResponseCreate = true;
+      return;
+    }
+    channel.send(JSON.stringify({ type: 'response.create' }));
+  };
+
   const cleanup = () => {
     dc?.close();
     dc = null;
@@ -125,7 +147,7 @@ export async function connectOpenAI(
           },
         }),
       );
-      channel.send(JSON.stringify({ type: 'response.create' }));
+      requestResponse(channel);
 
       onExchangeComplete(question, { role: 'assistant', text: res.answer, sources: res.sources });
     } catch (err) {
@@ -142,7 +164,7 @@ export async function connectOpenAI(
           },
         }),
       );
-      channel.send(JSON.stringify({ type: 'response.create' }));
+      requestResponse(channel);
       setError(detail);
     }
   };
@@ -166,7 +188,19 @@ export async function connectOpenAI(
         // _VOICE_SESSION_INSTRUCTIONS); this response.create is what
         // actually triggers it to say that opening line now, before any
         // user audio has arrived.
-        channel.send(JSON.stringify({ type: 'response.create' }));
+        requestResponse(channel);
+        break;
+
+      case 'response.created':
+        responseActive = true;
+        break;
+
+      case 'response.done':
+        responseActive = false;
+        if (pendingResponseCreate) {
+          pendingResponseCreate = false;
+          requestResponse(channel);
+        }
         break;
 
       case 'input_audio_buffer.speech_started':
