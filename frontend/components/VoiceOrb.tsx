@@ -5,104 +5,398 @@ import { useEffect, useRef } from 'react';
 export type OrbState = 'listening' | 'thinking' | 'speaking';
 
 interface Particle {
-  a: number; // fixed polar angle
-  r: number; // fixed polar radius from center, 2-26px
-  s: number; // square size, mostly 0.9px, ~15% at 1.6px
-  ph: number; // twinkle phase
-  jph: number; // jitter phase
+  a: number;
+  r: number;
+  size: number;
+  phase: number;
+  speed: number;
+  drift: number;
 }
 
-/**
- * Canvas-based voice orb, ported 1:1 from the HR Chatbot design handoff's
- * `_startOrb`/`_drawOrb` methods (see design_handoff_hr_chatbot/HR
- * Chatbot.dc.html). Renders at 72x72 internal resolution, displayed at
- * 180x180 CSS px with `image-rendering: pixelated` for the chunky/pixel
- * texture -- driven by the REAL voice state machine (listening/thinking/
- * speaking come from actual speech-to-text / LLM / TTS events, see
- * hooks/useRealtimeVoice.ts and hooks/voice/*), not a scripted demo timer.
- */
 export function VoiceOrb({ state }: { state: OrbState }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stateRef = useRef(state);
+
   stateRef.current = state;
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+
     ctx.imageSmoothingEnabled = false;
 
-    const particles: Particle[] = Array.from({ length: 70 }, () => ({
-      a: Math.random() * Math.PI * 2,
-      r: Math.random() * 24 + 2,
-      s: Math.random() < 0.15 ? 1.6 : 0.9,
-      ph: Math.random() * Math.PI * 2,
-      jph: Math.random() * Math.PI * 2,
-    }));
+    const SIZE = 104;
+    const CENTER = SIZE / 2;
+
+    const particles: Particle[] = Array.from(
+      { length: 120 },
+      (_, i) => {
+        const angle =
+          (i / 120) * Math.PI * 2;
+
+        return {
+          a:
+            angle +
+            (Math.random() - 0.5) * 0.2,
+
+          r:
+            4 +
+            Math.pow(Math.random(), 0.65) * 36,
+
+          size:
+            Math.random() < 0.14
+              ? 1.8
+              : 1,
+
+          phase:
+            Math.random() *
+            Math.PI *
+            2,
+
+          speed:
+            0.15 +
+            Math.random() * 0.45,
+
+          drift:
+            0.5 +
+            Math.random() * 1.2,
+        };
+      },
+    );
 
     const start = performance.now();
     let raf = 0;
 
-    const drawOrb = (cx: number, cy: number, t: number) => {
-      ctx.clearRect(0, 0, 72, 72);
-      const state = stateRef.current;
-      const agitated = state !== 'speaking';
-      const amp = state === 'thinking' ? 6.5 : state === 'listening' ? 4 : 1.4;
-      const freq = state === 'thinking' ? 3.4 : 2.4;
-      const speed = state === 'thinking' ? 1.7 : state === 'listening' ? 1.1 : 0.45;
-      const R = 27;
+    const drawOrb = (t: number) => {
+      ctx.clearRect(
+        0,
+        0,
+        SIZE,
+        SIZE,
+      );
 
+      const state = stateRef.current;
+
+      const config = {
+        listening: {
+          pulse: 0.9,
+          rimAmplitude: 3.2,
+          rimSpeed: 0.8,
+          particleSpeed: 0.8,
+          jitter: 0.45,
+          opacity: 0.72,
+        },
+
+        thinking: {
+          pulse: 1.35,
+          rimAmplitude: 6.5,
+          rimSpeed: 1.8,
+          particleSpeed: 1.7,
+          jitter: 1.8,
+          opacity: 0.92,
+        },
+
+        speaking: {
+          pulse: 1.8,
+          rimAmplitude: 2.3,
+          rimSpeed: 0.65,
+          particleSpeed: 1.1,
+          jitter: 0.3,
+          opacity: 0.84,
+        },
+      }[state];
+
+      /*
+       * Overall breathing motion.
+       */
+      const breath =
+        Math.sin(
+          t * config.pulse,
+        ) *
+          0.7 +
+        Math.sin(
+          t *
+            config.pulse *
+            0.47,
+        ) *
+          0.3;
+
+      const baseR =
+        38 +
+        breath * 1.5;
+
+      /*
+       * Particles.
+       */
       particles.forEach((p) => {
-        let jx = 0;
-        let jy = 0;
-        if (agitated) {
-          const k = state === 'thinking' ? 1.8 : 0.9;
-          jx = Math.sin(t * 2.2 + p.jph) * k;
-          jy = Math.cos(t * 2.0 + p.jph) * k;
-        }
-        const x = cx + Math.cos(p.a) * p.r + jx;
-        const y = cy + Math.sin(p.a) * p.r + jy;
-        const op = 0.4 + 0.55 * Math.abs(Math.sin(t * (agitated ? 2.6 : 1.1) + p.ph));
-        ctx.fillStyle = `rgba(109,75,184,${op.toFixed(2)})`;
-        ctx.fillRect(x, y, p.s, p.s);
+        const angle =
+          p.a +
+          t *
+            p.speed *
+            config.particleSpeed *
+            0.35;
+
+        const radialWave =
+          Math.sin(
+            t * p.drift +
+              p.phase,
+          ) *
+          config.jitter;
+
+        const radius =
+          p.r + radialWave;
+
+        const x =
+          CENTER +
+          Math.cos(angle) *
+            radius;
+
+        const y =
+          CENTER +
+          Math.sin(angle) *
+            radius;
+
+        const twinkle =
+          0.45 +
+          0.5 *
+            Math.abs(
+              Math.sin(
+                t *
+                  (state ===
+                  'thinking'
+                    ? 3
+                    : 1.6) +
+                  p.phase,
+              ),
+            );
+
+        const distanceFade =
+          0.55 +
+          0.45 *
+            (p.r / 42);
+
+        const opacity =
+          config.opacity *
+          twinkle *
+          distanceFade;
+
+        ctx.fillStyle =
+          `rgba(109,75,184,${opacity.toFixed(2)})`;
+
+        ctx.fillRect(
+          Math.round(x),
+          Math.round(y),
+          p.size,
+          p.size,
+        );
       });
 
-      const N = 18;
-      for (let pass = 0; pass < 2; pass++) {
-        const rimR = R + 1 + pass * 2;
+      /*
+       * Organic outer rim.
+       */
+      const POINTS = 64;
+
+      for (
+        let pass = 2;
+        pass >= 0;
+        pass--
+      ) {
+        const radius =
+          baseR +
+          pass * 2.2;
+
         ctx.beginPath();
-        for (let i = 0; i <= N; i++) {
-          const a = (i / N) * Math.PI * 2;
-          const rad = rimR + amp * Math.sin(freq * a + t * speed) + amp * 0.5 * Math.sin(freq * 1.8 * a - t * speed * 1.3);
-          const x = cx + Math.cos(a) * rad;
-          const y = cy + Math.sin(a) * rad;
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
+
+        for (
+          let i = 0;
+          i <= POINTS;
+          i++
+        ) {
+          const angle =
+            (i / POINTS) *
+            Math.PI *
+            2;
+
+          const wave1 =
+            Math.sin(
+              angle * 3 +
+                t *
+                  config.rimSpeed,
+            );
+
+          const wave2 =
+            Math.sin(
+              angle * 5.3 -
+                t *
+                  config.rimSpeed *
+                  0.72,
+            );
+
+          const wave3 =
+            Math.sin(
+              angle * 7.7 +
+                t *
+                  config.rimSpeed *
+                  1.4,
+            );
+
+          const turbulence =
+            state === 'thinking'
+              ? Math.sin(
+                  angle * 11 -
+                    t * 2.4,
+                ) * 0.9
+              : 0;
+
+          const deformation =
+            wave1 *
+              config.rimAmplitude +
+            wave2 *
+              config.rimAmplitude *
+              0.42 +
+            wave3 *
+              config.rimAmplitude *
+              0.18 +
+            turbulence;
+
+          const r =
+            radius +
+            deformation;
+
+          const x =
+            CENTER +
+            Math.cos(angle) *
+              r;
+
+          const y =
+            CENTER +
+            Math.sin(angle) *
+              r;
+
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
         }
+
         ctx.closePath();
-        ctx.strokeStyle = pass === 0 ? 'rgba(109,75,184,0.7)' : 'rgba(109,75,184,0.3)';
+
+        const opacity =
+          pass === 0
+            ? 0.76
+            : pass === 1
+              ? 0.3
+              : 0.12;
+
+        ctx.strokeStyle =
+          `rgba(109,75,184,${opacity})`;
+
         ctx.lineWidth = 1;
+
         ctx.stroke();
       }
+
+      /*
+       * Subtle inner energy ring.
+       */
+      const corePulse =
+        0.5 +
+        0.5 *
+          Math.sin(
+            t * config.pulse,
+          );
+
+      const coreR =
+        29 +
+        corePulse * 1.5;
+
+      ctx.beginPath();
+
+      for (
+        let i = 0;
+        i <= POINTS;
+        i++
+      ) {
+        const angle =
+          (i / POINTS) *
+          Math.PI *
+          2;
+
+        const wobble =
+          Math.sin(
+            angle * 4 +
+              t * 0.8,
+          ) * 0.5;
+
+        const r =
+          coreR + wobble;
+
+        const x =
+          CENTER +
+          Math.cos(angle) * r;
+
+        const y =
+          CENTER +
+          Math.sin(angle) * r;
+
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+
+      ctx.closePath();
+
+      ctx.strokeStyle =
+        `rgba(109,75,184,${(
+          0.12 +
+          corePulse * 0.08
+        ).toFixed(2)})`;
+
+      ctx.stroke();
     };
 
-    const loop = (now: number) => {
-      drawOrb(36, 36, (now - start) / 1000);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
+    const loop = (
+      now: number,
+    ) => {
+      drawOrb(
+        (now - start) / 1000,
+      );
 
-    return () => cancelAnimationFrame(raf);
+      raf =
+        requestAnimationFrame(
+          loop,
+        );
+    };
+
+    raf =
+      requestAnimationFrame(
+        loop,
+      );
+
+    return () =>
+      cancelAnimationFrame(
+        raf,
+      );
   }, []);
 
   return (
-    <div className="flex h-[180px] w-[180px] items-center justify-center">
+    <div className="flex h-[260px] w-[260px] items-center justify-center">
       <canvas
         ref={canvasRef}
-        width={72}
-        height={72}
-        style={{ width: 180, height: 180, imageRendering: 'pixelated' }}
+        width={104}
+        height={104}
+        style={{
+          width: 260,
+          height: 260,
+          imageRendering:
+            'pixelated',
+        }}
       />
     </div>
   );
