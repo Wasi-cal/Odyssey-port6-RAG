@@ -32,6 +32,28 @@ export async function connectOpenAI(
   let micStream: MediaStream | null = null;
   let audioEl: HTMLAudioElement | null = null;
 
+  // Tracks whether the assistant's own audio for this turn has already
+  // started streaming -- guards against a distinct caption race confirmed
+  // live (Playwright + real OpenAI Realtime API, fake mic audio): the
+  // employee's OWN speech transcript
+  // (conversation.item.input_audio_transcription.completed) comes back
+  // from a separate, slower async transcription pipeline, and can arrive
+  // AFTER the assistant's reply has already started streaming its own
+  // response.output_audio_transcript.delta events. Since that handler does
+  // a full setCaptionText(message.transcript) REPLACE while the delta
+  // handler does setCaptionText((prev) => prev + delta), a late user
+  // transcript landing in between two deltas got prepended into the
+  // caption and then had more of the assistant's OWN reply appended onto
+  // it -- observed live as caption text like "Please give me a detailed
+  // multi-sentence answer. provide a thorough" (the user's transcript
+  // spliced together with the assistant's in-progress reply) for several
+  // hundred ms, until the reply's own .done event happened to fully
+  // replace and self-heal it. Once the assistant's audio has started for
+  // this turn, the caption belongs to ITS transcript, not a delayed
+  // display of what the employee said -- so a late transcription-completed
+  // event is simply dropped instead of stomping on it.
+  let assistantAudioActive = false;
+
   const cleanup = () => {
     dc?.close();
     dc = null;
@@ -124,11 +146,24 @@ export async function connectOpenAI(
         setCaptionText('');
         setSources([]);
         setStatus('listening');
+        // A new employee utterance is starting (including a barge-in over
+        // the agent) -- the caption no longer belongs to whatever the
+        // assistant was saying, so a still-in-flight transcription-
+        // completed event for THAT prior turn is stale too and shouldn't
+        // land once this fires. This mirrors resetting below on the
+        // assistant's own turn start.
+        assistantAudioActive = false;
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
         console.log('[voice/openai] user transcript:', message.transcript);
-        if (message.transcript) setCaptionText(message.transcript);
+        // See assistantAudioActive's docstring above -- this transcript
+        // comes from a slower, separate async pipeline and can arrive
+        // after the assistant's reply has already started streaming its
+        // own caption text. Dropping it once that's happened is what
+        // actually fixes the race, rather than just narrowing the window
+        // it can land in.
+        if (message.transcript && !assistantAudioActive) setCaptionText(message.transcript);
         break;
 
       case 'response.function_call_arguments.done':
@@ -139,6 +174,7 @@ export async function connectOpenAI(
       case 'output_audio_buffer.started':
         setStatus('speaking');
         setCaptionText('');
+        assistantAudioActive = true;
         break;
 
       case 'response.output_audio_transcript.delta':
@@ -152,6 +188,7 @@ export async function connectOpenAI(
 
       case 'output_audio_buffer.stopped':
         setStatus('listening');
+        assistantAudioActive = false;
         break;
 
       case 'error':

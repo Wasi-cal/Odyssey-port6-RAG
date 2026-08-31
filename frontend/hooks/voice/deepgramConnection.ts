@@ -55,6 +55,38 @@ export async function connectDeepgram(
   let muteSink: GainNode | null = null;
   let nextPlayTime = 0;
 
+  // Root cause of BOTH "captions flash to the last line" and part of the
+  // "audio sounds garbled" reports (confirmed live via a mock Deepgram
+  // server that reproduces the real cadence: ConversationText for segment
+  // N+1 arrives while segment N's audio is still only a fraction of the
+  // way through playing, since Deepgram generates text+speech well ahead
+  // of real-time and each spoken segment gets its own
+  // AgentStartedSpeaking/ConversationText/AgentAudioDone triplet -- see
+  // AgentAudioDone's comment below): ConversationText used to call
+  // setCaptionText(message.content) the instant the event arrived, i.e. at
+  // TEXT-GENERATION time, not at the moment that segment's audio actually
+  // reaches the speaker. Across a 3-segment answer this measured as each
+  // segment's caption getting overwritten within ~150-250ms of appearing,
+  // while its own audio was still 2+ seconds from finishing -- so by the
+  // time playback caught up, only the last segment's text was ever left on
+  // screen; the first two were never on screen long enough to read.
+  //
+  // Fix: caption reveals are scheduled against the same clock the audio
+  // itself is scheduled on (audioCtx's clock via nextPlayTime), not shown
+  // the instant the text arrives. `nextPlayTime` at the moment a segment's
+  // ConversationText arrives is exactly when that segment's audio will
+  // begin playing (chunks always arrive after the text in the wire
+  // protocol, and are appended to the running nextPlayTime schedule), so a
+  // setTimeout keyed off `nextPlayTime - audioCtx.currentTime` reveals each
+  // segment's caption in sync with the listener actually hearing it,
+  // instead of racing ahead of their ears.
+  let captionTimers: ReturnType<typeof setTimeout>[] = [];
+
+  const clearCaptionSchedule = () => {
+    captionTimers.forEach((t) => clearTimeout(t));
+    captionTimers = [];
+  };
+
   const cleanup = () => {
     ws?.close();
     ws = null;
@@ -69,6 +101,7 @@ export async function connectDeepgram(
     audioCtx?.close().catch(() => {});
     audioCtx = null;
     nextPlayTime = 0;
+    clearCaptionSchedule();
   };
 
   const playPcm16 = (data: ArrayBuffer) => {
@@ -190,6 +223,11 @@ export async function connectDeepgram(
         break;
 
       case 'UserStartedSpeaking':
+        // Barge-in / next turn starting -- cancel any still-pending
+        // scheduled caption reveals from a turn that's being interrupted,
+        // so a stale future segment's text can't pop in after the user has
+        // already started talking over the agent.
+        clearCaptionSchedule();
         setCaptionText('');
         setSources([]);
         setStatus('listening');
@@ -197,7 +235,25 @@ export async function connectDeepgram(
 
       case 'ConversationText':
         console.log('[voice/deepgram] transcript:', message.role, message.content);
-        if (message.content) setCaptionText(message.content);
+        if (message.content) {
+          if (message.role === 'assistant' && audioCtx) {
+            // Sync this segment's caption reveal to when its audio will
+            // actually be HEARD, not to when the text itself arrived --
+            // see the caption-scheduling comment above nextPlayTime's
+            // declaration for why. `nextPlayTime` right now (before this
+            // segment's own PCM chunks get appended to the schedule by
+            // playPcm16 below) is exactly that moment.
+            const text = message.content;
+            const playAt = nextPlayTime;
+            const delayMs = Math.max(0, (playAt - audioCtx.currentTime) * 1000);
+            captionTimers.push(setTimeout(() => setCaptionText(text), delayMs));
+          } else {
+            // The employee's own live transcript (role 'user') isn't tied
+            // to any scheduled playback -- show it immediately, same as
+            // before.
+            setCaptionText(message.content);
+          }
+        }
         break;
 
       case 'AgentThinking':
@@ -226,7 +282,27 @@ export async function connectDeepgram(
         // their own. STARTUP_BUFFER_SECONDS of silent lead time absorbs
         // that jitter instead of audibilizing it.
         setStatus('speaking');
-        if (audioCtx) nextPlayTime = audioCtx.currentTime + STARTUP_BUFFER_SECONDS;
+        // Bug fix: Deepgram fires AgentStartedSpeaking once per spoken
+        // SEGMENT, not once per turn (confirmed live -- see AgentAudioDone
+        // below), but this used to unconditionally overwrite nextPlayTime
+        // with "now plus a small buffer" on every single one of those
+        // events. For every segment after the first in a turn, the
+        // previous segment's audio was almost always still scheduled
+        // *well* into the future at that point (confirmed live: segment
+        // 2's AgentStartedSpeaking fired ~150ms after segment 1's audio
+        // started, while segment 1's nextPlayTime schedule ran ~3 more
+        // seconds out) -- unconditionally overwriting it rewound the
+        // schedule backwards, so segment 2 (and 3, ...) got scheduled to
+        // start almost immediately, ON TOP of the still-playing earlier
+        // segment(s). That's audio from multiple segments literally
+        // overlapping at the speaker -- a very plausible contributor to
+        // the separately-reported "garbled/no clarity" voice quality
+        // complaint, not just a Deepgram voice-model issue. Math.max here
+        // preserves the original startup-jitter-buffer behavior for a
+        // genuine first chunk (nextPlayTime is 0, or already in the past
+        // because of a real gap) while never rewinding a schedule that's
+        // still legitimately ahead of real time.
+        if (audioCtx) nextPlayTime = Math.max(nextPlayTime, audioCtx.currentTime + STARTUP_BUFFER_SECONDS);
         break;
 
       case 'AgentAudioDone':
