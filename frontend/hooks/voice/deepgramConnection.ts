@@ -31,6 +31,22 @@ export async function connectDeepgram(
 
   const SAMPLE_RATE = 24000; // must match assistant/voice/deepgram_provider.py's Settings audio config
 
+  // Silent lead time given to the FIRST audio chunk of each agent speaking
+  // turn (see AgentStartedSpeaking below) -- absorbs ordinary network
+  // jitter on the next chunk or two instead of it audibilizing as a gap.
+  // 120ms is short enough to be imperceptible as added latency but long
+  // enough to cover the jitter actually observed live.
+  const STARTUP_BUFFER_SECONDS = 0.12;
+  // Linear fade in/out applied to every PCM chunk's own gain envelope (see
+  // playPcm16) -- each chunk plays through its own AudioBufferSourceNode,
+  // and back-to-back nodes aren't guaranteed to be sample-continuous at
+  // their boundary (the encoder/network can chunk mid-waveform), which
+  // reproduces live as an audible click/pop -- reported as "sudden
+  // bursts" -- at every chunk boundary, worst right at the start of a
+  // turn where there's nothing to mask it yet. 4ms is short enough that it
+  // doesn't audibly shave the actual speech content.
+  const CHUNK_FADE_SECONDS = 0.004;
+
   let ws: WebSocket | null = null;
   let micStream: MediaStream | null = null;
   let audioCtx: AudioContext | null = null;
@@ -66,9 +82,25 @@ export async function connectDeepgram(
 
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
-    source.connect(audioCtx.destination);
+
+    // Route through a per-chunk GainNode instead of straight to
+    // destination, purely to ramp gain up/down over CHUNK_FADE_SECONDS at
+    // each chunk's start/end -- see CHUNK_FADE_SECONDS' comment above for
+    // why (audible clicks/"bursts" at chunk boundaries otherwise). Fades
+    // are clamped to at most half the buffer's own duration so a very
+    // short chunk still fades smoothly rather than the in/out ramps
+    // overlapping and fighting each other.
+    const gain = audioCtx.createGain();
+    source.connect(gain);
+    gain.connect(audioCtx.destination);
 
     const startAt = Math.max(audioCtx.currentTime, nextPlayTime);
+    const fade = Math.min(CHUNK_FADE_SECONDS, buffer.duration / 2);
+    gain.gain.setValueAtTime(0, startAt);
+    gain.gain.linearRampToValueAtTime(1, startAt + fade);
+    gain.gain.setValueAtTime(1, startAt + buffer.duration - fade);
+    gain.gain.linearRampToValueAtTime(0, startAt + buffer.duration);
+
     source.start(startAt);
     nextPlayTime = startAt + buffer.duration;
   };
@@ -174,22 +206,45 @@ export async function connectDeepgram(
 
       case 'AgentStartedSpeaking':
         // Deliberately does NOT clear the caption here: ConversationText
-        // for the agent's own turn (see above) carries the full spoken
-        // text and is confirmed live to arrive at essentially the same
-        // moment as this event -- sometimes a beat before it, since
-        // Deepgram needs the complete text before TTS synthesis can even
-        // start. Clearing the caption here used to wipe out that
-        // just-set text almost immediately, which read as the subtitle
-        // flashing and disappearing before (or as) the agent actually
-        // started speaking. The caption now persists for the whole
-        // AgentStartedSpeaking -> AgentAudioDone window and is cleared
-        // there instead, once the agent has actually finished talking.
+        // for the agent's own turn (see above) carries the spoken text and
+        // is confirmed live to arrive at essentially the same moment as
+        // this event -- sometimes a beat before it, since Deepgram needs
+        // the text before TTS synthesis can even start. Clearing the
+        // caption here used to wipe out that just-set text almost
+        // immediately, which read as the subtitle flashing and
+        // disappearing before (or as) the agent actually started speaking.
+        //
+        // Also resets the playback scheduling clock (see playPcm16) to
+        // "now plus a small pre-roll," not straight to "now" -- confirmed
+        // live that scheduling the very first chunk of a turn right at
+        // audioCtx.currentTime left no slack for ordinary network jitter
+        // on the next couple of chunks, so a slightly-late chunk kept
+        // getting rescheduled to "whatever time it happens to arrive"
+        // instead of "right after the previous chunk," producing an
+        // audible gap -- most noticeable right at the start of a turn,
+        // before enough chunks had arrived to naturally build up slack of
+        // their own. STARTUP_BUFFER_SECONDS of silent lead time absorbs
+        // that jitter instead of audibilizing it.
         setStatus('speaking');
+        if (audioCtx) nextPlayTime = audioCtx.currentTime + STARTUP_BUFFER_SECONDS;
         break;
 
       case 'AgentAudioDone':
+        // Deliberately does NOT clear the caption -- Deepgram fires this
+        // once per spoken audio SEGMENT, not once for the agent's entire
+        // turn (confirmed live: a multi-sentence answer produced repeated
+        // AgentStartedSpeaking/AgentAudioDone pairs within what reads as
+        // one logical turn). Clearing here wiped the caption after just
+        // the first segment while the agent kept talking, which is the
+        // exact "captions flash and don't stay" bug reported live -- the
+        // AgentStartedSpeaking-based clear was fixed first, but this one
+        // reproduced the same symptom through a different event. The
+        // caption is now cleared only by UserStartedSpeaking above (the
+        // start of the employee's NEXT turn), so it simply stays on
+        // screen showing the agent's last words until then -- correct
+        // regardless of how many audio segments a single answer is split
+        // into.
         setStatus('listening');
-        setCaptionText('');
         break;
 
       case 'FunctionCallRequest':
