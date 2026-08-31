@@ -54,6 +54,12 @@ export async function connectDeepgram(
   let micProcessor: ScriptProcessorNode | null = null;
   let muteSink: GainNode | null = null;
   let nextPlayTime = 0;
+  // Tapped off micSource (input) and every played chunk (output, via
+  // outputAnalyser sitting between each chunk's gain node and
+  // destination) -- purely for level/frequency analysis, e.g. VoiceOrb's
+  // audio-reactive motion, never a second audio path of their own.
+  let inputAnalyser: AnalyserNode | null = null;
+  let outputAnalyser: AnalyserNode | null = null;
 
   // Root cause of BOTH "captions flash to the last line" and part of the
   // "audio sounds garbled" reports (confirmed live via a mock Deepgram
@@ -101,6 +107,8 @@ export async function connectDeepgram(
     audioCtx?.close().catch(() => {});
     audioCtx = null;
     nextPlayTime = 0;
+    inputAnalyser = null;
+    outputAnalyser = null;
     clearCaptionSchedule();
   };
 
@@ -125,7 +133,12 @@ export async function connectDeepgram(
     // overlapping and fighting each other.
     const gain = audioCtx.createGain();
     source.connect(gain);
-    gain.connect(audioCtx.destination);
+    if (!outputAnalyser) {
+      outputAnalyser = audioCtx.createAnalyser();
+      outputAnalyser.fftSize = 256;
+      outputAnalyser.connect(audioCtx.destination);
+    }
+    gain.connect(outputAnalyser);
 
     const startAt = Math.max(audioCtx.currentTime, nextPlayTime);
     const fade = Math.min(CHUNK_FADE_SECONDS, buffer.duration / 2);
@@ -160,6 +173,9 @@ export async function connectDeepgram(
       ws.send(int16.buffer);
     };
 
+    inputAnalyser = audioCtx.createAnalyser();
+    inputAnalyser.fftSize = 256;
+    micSource.connect(inputAnalyser);
     micSource.connect(micProcessor);
     micProcessor.connect(muteSink);
     muteSink.connect(audioCtx.destination);
@@ -418,5 +434,7 @@ export async function connectDeepgram(
     });
   };
 
-  return { disconnect: cleanup, setMuted };
+  const getAnalysers = () => ({ input: inputAnalyser, output: outputAnalyser });
+
+  return { disconnect: cleanup, setMuted, getAnalysers };
 }

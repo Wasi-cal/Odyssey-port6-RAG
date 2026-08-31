@@ -402,6 +402,8 @@ export function useDocAssist() {
     captionText: voice.captionText,
     voiceSources: voice.sources,
     voiceMuted: voice.muted,
+    voiceInputAnalyser: voice.inputAnalyser,
+    voiceOutputAnalyser: voice.outputAnalyser,
     toggleVoiceMute: voice.toggleMute,
     responseStyle,
     citeSources,

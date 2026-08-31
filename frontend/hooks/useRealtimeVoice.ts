@@ -36,17 +36,46 @@ export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealti
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
+  const [inputAnalyser, setInputAnalyser] = useState<AnalyserNode | null>(null);
+  const [outputAnalyser, setOutputAnalyser] = useState<AnalyserNode | null>(null);
 
   const connectionRef = useRef<VoiceConnection | null>(null);
+  const analyserPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopAnalyserPoll = useCallback(() => {
+    if (analyserPollRef.current) {
+      clearInterval(analyserPollRef.current);
+      analyserPollRef.current = null;
+    }
+  }, []);
+
+  // The output analyser in particular isn't available the instant
+  // connect() resolves -- both connection modules create it lazily, the
+  // moment the agent's first audio track/chunk actually arrives (there's
+  // no dedicated "audio graph ready" event to hook instead). Polling
+  // every 300ms for the connection's lifetime is cheap and simple, and
+  // just re-sets React state to the same object once it stabilizes (no
+  // extra re-renders beyond the one that matters).
+  const startAnalyserPoll = useCallback(() => {
+    stopAnalyserPoll();
+    analyserPollRef.current = setInterval(() => {
+      const a = connectionRef.current?.getAnalysers?.();
+      setInputAnalyser(a?.input ?? null);
+      setOutputAnalyser(a?.output ?? null);
+    }, 300);
+  }, [stopAnalyserPoll]);
 
   const reset = useCallback(() => {
     connectionRef.current?.disconnect();
     connectionRef.current = null;
+    stopAnalyserPoll();
     setStatus('idle');
     setCaptionText('');
     setSources([]);
     setMuted(false);
-  }, []);
+    setInputAnalyser(null);
+    setOutputAnalyser(null);
+  }, [stopAnalyserPoll]);
 
   const disconnect = useCallback(() => {
     // Clears any error left over from THIS call (not folded into reset()
@@ -75,12 +104,16 @@ export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealti
           : await connectOpenAI(session, callbacks);
 
       connectionRef.current = connection;
+      const a = connection.getAnalysers?.();
+      setInputAnalyser(a?.input ?? null);
+      setOutputAnalyser(a?.output ?? null);
+      startAnalyserPoll();
     } catch (err) {
       console.error('[voice] connect() failed:', err);
       setError(err instanceof Error ? err.message : 'Failed to start voice session.');
       reset();
     }
-  }, [getSessionId, onExchangeComplete, reset]);
+  }, [getSessionId, onExchangeComplete, reset, startAnalyserPoll]);
 
   const toggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -90,5 +123,16 @@ export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealti
     });
   }, []);
 
-  return { status, captionText, sources, error, muted, connect, disconnect, toggleMute };
+  return {
+    status,
+    captionText,
+    sources,
+    error,
+    muted,
+    inputAnalyser,
+    outputAnalyser,
+    connect,
+    disconnect,
+    toggleMute,
+  };
 }

@@ -28,4 +28,11 @@ export interface VoiceConnection {
   /** Mutes/unmutes the outgoing mic track (real hardware mute, not just a
    * UI flag) -- wired from the voice overlay's mute button. */
   setMuted?: (muted: boolean) => void;
+  /** Real Web Audio AnalyserNodes tapped off the live mic input and the
+   * agent's spoken output (never connected to a destination themselves --
+   * purely for level/frequency analysis, e.g. VoiceOrb's audio-reactive
+   * motion), so the orb reacts to actual audio rather than a simulated
+   * envelope. Both null until the underlying audio graph is actually
+   * live (e.g. before the first track arrives). */
+  getAnalysers?: () => { input: AnalyserNode | null; output: AnalyserNode | null };
 }

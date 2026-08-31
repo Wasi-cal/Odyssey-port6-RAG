@@ -148,6 +148,17 @@ export function Workspace() {
             captionText={d.captionText}
             sources={d.voiceSources}
             muted={d.voiceMuted}
+            // Real audio-reactivity for the orb: the employee's own mic
+            // while listening, the agent's spoken output while speaking.
+            // 'thinking'/'connecting' have no relevant live audio (the
+            // orb's own simulated envelope covers those).
+            analyser={
+              d.voiceStatus === 'listening'
+                ? d.voiceInputAnalyser
+                : d.voiceStatus === 'speaking'
+                  ? d.voiceOutputAnalyser
+                  : null
+            }
             onToggleMute={d.toggleVoiceMute}
             onClose={d.toggleListen}
             onOpenSource={d.openSource}

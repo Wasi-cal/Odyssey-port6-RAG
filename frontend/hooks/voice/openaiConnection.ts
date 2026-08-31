@@ -32,6 +32,15 @@ export async function connectOpenAI(
   let micStream: MediaStream | null = null;
   let audioEl: HTMLAudioElement | null = null;
 
+  // Separate AudioContext purely for analysis (never connected to
+  // `.destination` itself) -- WebRTC handles actual playback/capture on
+  // its own graph via `audioEl`/the RTCPeerConnection, this just taps the
+  // same MediaStreamTracks for level/frequency data so VoiceOrb can be
+  // genuinely audio-reactive instead of running its simulated envelope.
+  let analysisCtx: AudioContext | null = null;
+  let inputAnalyser: AnalyserNode | null = null;
+  let outputAnalyser: AnalyserNode | null = null;
+
   // Tracks whether the assistant's own audio for this turn has already
   // started streaming -- guards against a distinct caption race confirmed
   // live (Playwright + real OpenAI Realtime API, fake mic audio): the
@@ -80,6 +89,10 @@ export async function connectOpenAI(
       audioEl.srcObject = null;
       audioEl = null;
     }
+    inputAnalyser = null;
+    outputAnalyser = null;
+    analysisCtx?.close().catch(() => {});
+    analysisCtx = null;
   };
 
   const handleFunctionCall = async (channel: RTCDataChannel, message: any) => {
@@ -261,6 +274,11 @@ export async function connectOpenAI(
     throw new Error('Microphone access is required for voice.');
   }
 
+  analysisCtx = new AudioContext();
+  inputAnalyser = analysisCtx.createAnalyser();
+  inputAnalyser.fftSize = 256;
+  analysisCtx.createMediaStreamSource(micStream).connect(inputAnalyser);
+
   try {
     pc = new RTCPeerConnection();
 
@@ -283,6 +301,14 @@ export async function connectOpenAI(
     audioEl.autoplay = true;
     pc.ontrack = (e) => {
       if (audioEl) audioEl.srcObject = e.streams[0];
+      // Same track, tapped a second time into the analysis-only graph --
+      // native <audio> playback above is unaffected, this is purely a
+      // parallel consumer for level data.
+      if (analysisCtx) {
+        outputAnalyser = analysisCtx.createAnalyser();
+        outputAnalyser.fftSize = 256;
+        analysisCtx.createMediaStreamSource(e.streams[0]).connect(outputAnalyser);
+      }
     };
 
     const [audioTrack] = micStream.getAudioTracks();
@@ -328,5 +354,7 @@ export async function connectOpenAI(
     cleanup();
   };
 
-  return { disconnect, setMuted };
+  const getAnalysers = () => ({ input: inputAnalyser, output: outputAnalyser });
+
+  return { disconnect, setMuted, getAnalysers };
 }
