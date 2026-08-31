@@ -93,11 +93,19 @@ def resolve_deepgram_think_temperature() -> float:
 
 
 def resolve_openai_temperature() -> float:
-    """Sampling temperature for the OpenAI Realtime session itself -- see
-    defaults.py's bug-fix note (#8). 0.6 is OpenAI's documented Realtime
-    API minimum; there's no lower knob or a `seed` equivalent for this path.
+    """Read from config_store for backward compatibility but NOT actually
+    forwarded to the API by OpenAIVoiceProvider -- see defaults.py's
+    OPENAI_REALTIME_TEMPERATURE comment: the current Realtime API has no
+    session-level temperature field at all.
     """
     return config_store.get("voice", "openai_temperature", defaults.OPENAI_REALTIME_TEMPERATURE)
+
+
+def resolve_openai_speed() -> float:
+    """Playback-speed multiplier for the OpenAI Realtime session's spoken
+    output -- see defaults.py's OPENAI_REALTIME_SPEED.
+    """
+    return config_store.get("voice", "openai_speed", defaults.OPENAI_REALTIME_SPEED)
 
 
 def get_voice_provider() -> RealtimeVoiceProvider:
@@ -135,4 +143,5 @@ def get_voice_provider() -> RealtimeVoiceProvider:
         voice=resolve_openai_voice(),
         instructions=openai_instructions,
         temperature=resolve_openai_temperature(),
+        speed=resolve_openai_speed(),
     )

@@ -37,22 +37,28 @@ DEEPGRAM_SPEAK_MODEL = "aura-2-thalia-en"
 # defaulting to OpenAI's own 1.0). At that much sampling variance, the same
 # instructions can read as a noticeably different tone/style call to call
 # -- that's genuine LLM sampling behavior, not a bug in how instructions
-# are stored or loaded. Mitigation: pin both paths as low as each API
-# allows -- routers/voice.py's llm_proxy now overrides (not just sets) the
-# `temperature` field on every request it forwards to OpenAI for the
-# Deepgram path (the only place that request body is actually
-# constructed/controlled by us), and OpenAIVoiceProvider now sets
-# `temperature` in the Realtime session object it creates. Neither is
-# perfect determinism: OpenAI's Realtime API has no `seed` parameter at
-# all (voice is a live audio stream, not a single reproducible completion),
-# and even the Deepgram/chat-completions path's `seed` param is
-# "best-effort" per OpenAI's own docs, not a hard guarantee -- expect
-# noticeably MORE consistent tone/phrasing than before, not byte-identical
-# responses turn to turn.
+# are stored or loaded. Mitigation: pin the Deepgram path as low as that
+# API allows -- routers/voice.py's llm_proxy now overrides (not just sets)
+# the `temperature` field on every request it forwards to OpenAI for the
+# Deepgram BYO-LLM path (the only place that request body is actually
+# constructed/controlled by us). The OpenAI Realtime path has NO
+# equivalent knob at all: the current GA Realtime API
+# (RealtimeSessionCreateRequest) has no `temperature` field on the session
+# object -- sending one 400s the whole session creation ("Unknown
+# parameter: 'session.temperature'"), confirmed live. OPENAI_REALTIME_TEMPERATURE
+# below is therefore NOT forwarded to the API (see OpenAIVoiceProvider)
+# and some residual tone/persona variance session-to-session is inherent
+# to that provider, not fixable from our side.
 DEEPGRAM_THINK_TEMPERATURE = 0.3
-# 0.6 is OpenAI's documented Realtime API minimum (default is 0.8) -- as
-# low as this knob goes for that path.
 OPENAI_REALTIME_TEMPERATURE = 0.6
+
+# Post-processing playback-speed multiplier on the OpenAI Realtime API's
+# spoken output (RealtimeAudioConfigOutput.speed) -- 1.0 is OpenAI's
+# default, range is 0.25-1.5. "marin" (our recommended-quality voice, see
+# resolve_openai_voice) reads noticeably fast at the 1.0 default; 0.9
+# brings it back to a natural conversational pace without sounding
+# artificially slow.
+OPENAI_REALTIME_SPEED = 0.9
 
 # Spoken first, before the employee says anything -- see
 # assistant/voice/__init__.py's get_voice_provider() for how this reaches

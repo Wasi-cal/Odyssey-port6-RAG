@@ -475,9 +475,22 @@ def seed_defaults() -> None:
                 "key": "openai_temperature",
                 "value": voice_defaults.OPENAI_REALTIME_TEMPERATURE,
                 "description": (
-                    "Sampling temperature for the OpenAI Realtime session itself -- same "
-                    "bug-fix motivation as deepgram_think_temperature above. 0.6 is OpenAI's "
-                    "documented Realtime API minimum. Used only when voice/provider is 'openai'."
+                    "NOT currently forwarded to the API -- the GA Realtime API's "
+                    "RealtimeSessionCreateRequest has no session-level temperature field at "
+                    "all (confirmed live: sending one 400s the request). Kept only so "
+                    "config/call sites don't need to change if OpenAI ever adds an equivalent "
+                    "knob. Used only when voice/provider is 'openai'."
+                ),
+            },
+            {
+                "category": "voice",
+                "key": "openai_speed",
+                "value": voice_defaults.OPENAI_REALTIME_SPEED,
+                "description": (
+                    "Post-processing playback-speed multiplier on the OpenAI Realtime "
+                    "session's spoken output (RealtimeAudioConfigOutput.speed; 0.25-1.5, "
+                    "1.0 = OpenAI's default). 'marin' reads noticeably fast at 1.0 -- 0.9 "
+                    "brings it to a natural pace. Used only when voice/provider is 'openai'."
                 ),
             },
         ]

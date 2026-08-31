@@ -33,10 +33,22 @@ def _to_openai_tool(tool: ToolSpec) -> dict[str, Any]:
 
 
 class OpenAIVoiceProvider(RealtimeVoiceProvider):
-    def __init__(self, model: str, voice: str, instructions: str, temperature: float | None = None):
+    def __init__(
+        self,
+        model: str,
+        voice: str,
+        instructions: str,
+        temperature: float | None = None,
+        speed: float | None = None,
+    ):
         self._model = model
         self._voice = voice
         self._instructions = instructions
+        # Post-processing playback-speed multiplier (0.25-1.5, 1.0 =
+        # OpenAI's default) -- see defaults.py's OPENAI_REALTIME_SPEED.
+        # Unlike `temperature` below, this IS a real, currently-supported
+        # field (RealtimeAudioConfigOutput.speed).
+        self._speed = speed
         # `temperature` USED to be accepted at the session level (see
         # defaults.py's bug-fix note #8, "personality inconsistent across
         # restarts") but the current GA Realtime API
@@ -69,7 +81,10 @@ class OpenAIVoiceProvider(RealtimeVoiceProvider):
                     "instructions": self._instructions,
                     "audio": {
                         "input": {"transcription": {"model": "whisper-1"}},
-                        "output": {"voice": self._voice},
+                        "output": {
+                            "voice": self._voice,
+                            **({"speed": self._speed} if self._speed is not None else {}),
+                        },
                     },
                     "tools": [_to_openai_tool(t) for t in tools],
                     "tool_choice": "auto",
