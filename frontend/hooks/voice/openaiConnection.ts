@@ -54,6 +54,21 @@ export async function connectOpenAI(
   // event is simply dropped instead of stomping on it.
   let assistantAudioActive = false;
 
+  // Set the moment the USER intentionally hangs up (the returned
+  // `disconnect`, as opposed to `cleanup()` also being called internally
+  // on a genuine connection failure) -- guards a race confirmed live:
+  // hanging up while the assistant's audio is still mid-playback (e.g.
+  // right after the speed-adjusted response.audio.done/output_audio_buffer
+  // bookkeeping) can leave a non-fatal, already-irrelevant server 'error'
+  // event (e.g. "Audio content of 15000ms is already shorter than
+  // 16500ms") in flight on the data channel, which can still be delivered
+  // after dc.close() was called (WebRTC data channels don't guarantee
+  // already-buffered messages are dropped on close). That error is about a
+  // call the user already ended on purpose, so it's noise, not a real
+  // failure -- suppress it instead of popping it into the chat's error
+  // banner right after a clean hangup.
+  let userInitiatedDisconnect = false;
+
   const cleanup = () => {
     dc?.close();
     dc = null;
@@ -198,7 +213,12 @@ export async function connectOpenAI(
         // surface via setError, which it previously didn't (console-only),
         // so a real failure here looked identical to no response at all.
         // A truly dead connection is caught separately by
-        // pc.onconnectionstatechange below.
+        // pc.onconnectionstatechange below. Exception: if the user already
+        // hung up on purpose, see userInitiatedDisconnect's comment above.
+        if (userInitiatedDisconnect) {
+          console.warn('[voice/openai] server error event after intentional hangup, suppressed:', message.error);
+          break;
+        }
         console.error('[voice/openai] server error event:', message.error);
         setError(message.error?.message || 'Voice session error.');
         break;
@@ -279,5 +299,10 @@ export async function connectOpenAI(
     });
   };
 
-  return { disconnect: cleanup, setMuted };
+  const disconnect = () => {
+    userInitiatedDisconnect = true;
+    cleanup();
+  };
+
+  return { disconnect, setMuted };
 }
