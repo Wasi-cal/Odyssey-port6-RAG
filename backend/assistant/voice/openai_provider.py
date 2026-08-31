@@ -37,13 +37,18 @@ class OpenAIVoiceProvider(RealtimeVoiceProvider):
         self._model = model
         self._voice = voice
         self._instructions = instructions
-        # See defaults.py's bug-fix note (#8, "personality inconsistent
-        # across restarts") -- pins sampling temperature on the Realtime
-        # session so the same persona instructions aren't sampled at
-        # OpenAI's much higher default (0.8) every time. None (only if a
-        # caller explicitly constructs this without one) leaves the field
-        # out of the session dict below, falling back to OpenAI's own
-        # default rather than sending an invalid value.
+        # `temperature` USED to be accepted at the session level (see
+        # defaults.py's bug-fix note #8, "personality inconsistent across
+        # restarts") but the current GA Realtime API
+        # (RealtimeSessionCreateRequest, openai-python 1.109.1) has no such
+        # field at all -- sending it 400s with "Unknown parameter:
+        # 'session.temperature'". Kept as a constructor param (still read
+        # from config_store, still passed in by callers) so config/call
+        # sites don't need to change, but intentionally never forwarded to
+        # the API below. There is currently no supported way to pin
+        # sampling temperature on this API; some residual persona/tone
+        # variance across sessions is therefore inherent to this provider,
+        # not fixable from our side.
         self._temperature = temperature
 
     def create_session(self, tools: list[ToolSpec]) -> SessionCredentials:
@@ -68,7 +73,6 @@ class OpenAIVoiceProvider(RealtimeVoiceProvider):
                     },
                     "tools": [_to_openai_tool(t) for t in tools],
                     "tool_choice": "auto",
-                    **({"temperature": self._temperature} if self._temperature is not None else {}),
                 },
             )
         except Exception as e:
