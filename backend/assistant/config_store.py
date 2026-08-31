@@ -490,7 +490,8 @@ def seed_defaults() -> None:
                     "Post-processing playback-speed multiplier on the OpenAI Realtime "
                     "session's spoken output (RealtimeAudioConfigOutput.speed; 0.25-1.5, "
                     "1.0 = OpenAI's default). 'marin' reads noticeably fast at 1.0 -- 0.9 "
-                    "brings it to a natural pace. Used only when voice/provider is 'openai'."
+                    "was still reported too fast live, settled on 0.8. Used only when "
+                    "voice/provider is 'openai'."
                 ),
             },
         ]

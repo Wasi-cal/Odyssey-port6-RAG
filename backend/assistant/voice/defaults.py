@@ -55,10 +55,9 @@ OPENAI_REALTIME_TEMPERATURE = 0.6
 # Post-processing playback-speed multiplier on the OpenAI Realtime API's
 # spoken output (RealtimeAudioConfigOutput.speed) -- 1.0 is OpenAI's
 # default, range is 0.25-1.5. "marin" (our recommended-quality voice, see
-# resolve_openai_voice) reads noticeably fast at the 1.0 default; 0.9
-# brings it back to a natural conversational pace without sounding
-# artificially slow.
-OPENAI_REALTIME_SPEED = 0.9
+# resolve_openai_voice) reads noticeably fast at the 1.0 default; 0.9 was
+# tried first and still reported as too fast live, so this is 0.8.
+OPENAI_REALTIME_SPEED = 0.8
 
 # Spoken first, before the employee says anything -- see
 # assistant/voice/__init__.py's get_voice_provider() for how this reaches
