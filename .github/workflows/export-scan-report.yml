@@ -1,49 +1,65 @@
 name: Export scan report to S3
 
-# Calls Gozurion's reusable scan-export workflow, which scans this repo
-# with SonarQube and uploads the findings to S3. See:
-# https://github.com/Prakrit-Mohanty/Gozurion/blob/main/.github/workflows/export-sonar-report.yml
+# Scans this repo with semgrep + trivy and uploads the JSON findings to S3.
 #
 # Runs on every push to main, plus manually via Actions -> Export scan
 # report to S3 -> Run workflow.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
-#   SONAR_URL
-#   SONAR_TOKEN
 #   S3_ACCESS_KEY_ID
 #   S3_SECRET_ACCESS_KEY
 #   S3_BUCKET
 # Optional:
-#   S3_ENDPOINT_URL           (blank = real AWS S3; set for MinIO)
-#   GOZURION_CHECKOUT_TOKEN   (only needed if Gozurion is private and cross-org)
+#   S3_ENDPOINT_URL   (blank = real AWS S3; set for MinIO)
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      sonar_project_key:
-        description: "SonarQube project key - defaults to this repo's name"
-        required: false
-        type: string
-      gozurion_ref:
-        description: "Branch/tag of Gozurion to install the exporter from"
-        required: false
-        type: string
-        default: main
+  workflow_dispatch: {}
 
 jobs:
   export-scan-report:
-    uses: Prakrit-Mohanty/Gozurion/.github/workflows/export-sonar-report.yml@main
-    with:
-      sonar_project_key: ${{ inputs.sonar_project_key }}
-      gozurion_ref: ${{ inputs.gozurion_ref || 'main' }}
-    secrets:
-      SONAR_URL: ${{ secrets.SONAR_URL }}
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-      S3_BUCKET: ${{ secrets.S3_BUCKET }}
-      S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
-      GOZURION_CHECKOUT_TOKEN: ${{ secrets.GOZURION_CHECKOUT_TOKEN }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install semgrep
+        run: pip install semgrep
+
+      - name: Run semgrep
+        run: semgrep scan --config auto --json --output semgrep-results.json .
+        continue-on-error: true
+
+      - name: Install trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Run trivy
+        run: trivy fs --format json --output trivy-results.json .
+        continue-on-error: true
+
+      - name: Upload reports to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENDPOINT_ARGS=()
+          if [ -n "${S3_ENDPOINT_URL:-}" ]; then
+            ENDPOINT_ARGS=(--endpoint-url "$S3_ENDPOINT_URL")
+          fi
+          DEST="s3://${S3_BUCKET}/${GITHUB_REPOSITORY}/${GITHUB_SHA}"
+          aws s3 cp semgrep-results.json "${DEST}/semgrep-results.json" "${ENDPOINT_ARGS[@]}"
+          aws s3 cp trivy-results.json "${DEST}/trivy-results.json" "${ENDPOINT_ARGS[@]}"
