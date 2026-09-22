@@ -1,5 +1,5 @@
 # Doc Assist
-
+test for actions
 **The internal knowledge assistant that answers policy questions instantly — and never makes one up.**
 
 Doc Assist turns your HR policies, SOPs, and onboarding materials into a chatbot every employee can just *ask*. Every answer is grounded in an actual document and cited down to the page, every upload is reviewed by an admin before it's live, and every dollar spent on it is visible on a dashboard — not buried in an API bill you find out about at the end of the month.
