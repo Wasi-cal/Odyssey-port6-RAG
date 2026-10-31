@@ -1,0 +1,7 @@
+# Settings for the trial. Copy it to .gozu/jira-to-pr.yml in Wasi-cal/Odyssey-port6-RAG.
+jira_site_url: "https://gozu-calfus.atlassian.net"
+jira_project_keys: ["VT"]
+# A low ceiling keeps the first run cheap.
+token_ceiling: 30000
+# The VT workflow has only To Do, In Progress and Done. It has no In Review status.
+in_review_status: "In Progress"

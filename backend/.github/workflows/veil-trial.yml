@@ -1,0 +1,47 @@
+# Trial workflow for Wasi-cal/Odyssey-port6-RAG. Copy it to .github/workflows/veil-trial.yml in that repo.
+# It builds the veil image on the runner, because no image is published yet (GR-29).
+# Replace 1c1dd0fcf7e76650df2af70b2484683660564ee3 with the full commit SHA of veil that you pushed.
+name: veil-trial
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: veil-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  veil:
+    runs-on: ubuntu-latest
+    steps:
+      # The repo under trial. veil reads .gozu/jira-to-pr.yml from this checkout.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The veil source. The repo is public, so no token is needed.
+      - uses: actions/checkout@v4
+        with:
+          repository: Wasi-cal/veil
+          ref: 1c1dd0fcf7e76650df2af70b2484683660564ee3
+          path: .veil-src
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t veil:trial .veil-src
+      - name: Run veil
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/github/workspace" \
+            -v "$GITHUB_STEP_SUMMARY:$GITHUB_STEP_SUMMARY" \
+            -e GITHUB_WORKSPACE=/github/workspace \
+            -e GITHUB_REPOSITORY -e GITHUB_EVENT_NAME -e GITHUB_STEP_SUMMARY \
+            -e GITHUB_TOKEN -e JIRA_EMAIL -e JIRA_API_TOKEN -e OPENAI_API_KEY \
+            veil:trial
