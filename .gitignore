@@ -6,3 +6,7 @@ __pycache__/
 backend/data/pdfs/*
 !backend/data/pdfs/.gitkeep
 reports/
+
+# Build output and dependencies. Scans and tickets must not see them.
+frontend/.next/
+frontend/node_modules/
