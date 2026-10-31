@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Wasi-cal/veil
-          ref: d6b14a8b500f2a4bd28bcf7c1058d6374a6c0a53
+          ref: e052d82039d3fb574cffb7be31bbe5e5e2af5d71
           path: .veil-src
           persist-credentials: false
       - name: Build the image
