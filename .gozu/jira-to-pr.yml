@@ -2,7 +2,7 @@
 jira_site_url: "https://gozu-calfus.atlassian.net"
 jira_project_keys: ["VT"]
 # A low ceiling keeps the first run cheap.
-token_ceiling: 30000
+token_ceiling: 120000
 # The VT workflow has only To Do, In Progress and Done. It has no In Review status.
 in_review_status: "In Progress"
 # No label is needed. veil takes every open ticket without an assignee.
