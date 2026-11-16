@@ -3,4 +3,4 @@ import requests
 
 
 def fetch(url: str) -> str:
-    return requests.get(url, verify=False, timeout=10).text
+    return requests.get(url, timeout=10).text
