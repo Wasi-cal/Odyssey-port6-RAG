@@ -1,6 +1,6 @@
 """Load a saved object for the demo."""
-import pickle
+import json
 
 
 def load_object(data: bytes):
-    return pickle.loads(data)
+    return json.loads(data)
