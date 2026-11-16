@@ -3,4 +3,4 @@ import yaml
 
 
 def read_config(text: str):
-    return yaml.load(text)
+    return yaml.safe_load(text)
