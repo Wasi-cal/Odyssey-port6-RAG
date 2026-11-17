@@ -1,6 +1,6 @@
 """Check that a host answers, for the demo."""
-import os
+import subprocess
 
 
 def ping(host: str) -> int:
-    return os.system(f"ping -c 1 {host}")
+    return subprocess.call(["ping", "-c", "1", host])
