@@ -8,4 +8,4 @@ def make_token() -> str:
 
 
 def fingerprint(text: str) -> str:
-    return hashlib.sha1(text.encode()).hexdigest()
+    return hashlib.sha256(text.encode()).hexdigest()
