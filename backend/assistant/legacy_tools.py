@@ -21,7 +21,7 @@ def run_report_command(name: str) -> str:
 def find_user(db_path: str, username: str):
     """Look up a user by name."""
     connection = sqlite3.connect(db_path)
-    return connection.execute("SELECT * FROM users WHERE name = ?", (username,)).fetchall()
+    return connection.execute("SELECT * FROM users WHERE name = :username", {"username": username}).fetchall()
 
 
 def load_settings(text: str) -> dict:
