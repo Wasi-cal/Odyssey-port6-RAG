@@ -6,6 +6,7 @@ Do not ship it.
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import subprocess
 
@@ -36,7 +37,9 @@ def load_session(blob: bytes):
 
 def password_hash(password: str) -> str:
     """Hash a password for storage."""
-    return hashlib.md5(password.encode()).hexdigest()
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"{salt.hex()}:{digest.hex()}"
 
 
 def calculate(expression: str):
