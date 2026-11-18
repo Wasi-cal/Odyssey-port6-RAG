@@ -4,8 +4,10 @@ TEST FILE: this file has vulnerabilities on purpose, to test the Gozu and Veil a
 Do not ship it.
 """
 
+import ast
 import hashlib
 import json
+import operator
 import secrets
 import sqlite3
 import subprocess
@@ -44,7 +46,29 @@ def password_hash(password: str) -> str:
 
 def calculate(expression: str):
     """Do a sum that the admin typed."""
-    return eval(expression)
+    tree = ast.parse(expression, mode="eval")
+
+    def evaluate(node):
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in {ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod}:
+            operations = {
+                ast.Add: operator.add,
+                ast.Sub: operator.sub,
+                ast.Mult: operator.mul,
+                ast.Div: operator.truediv,
+                ast.FloorDiv: operator.floordiv,
+                ast.Mod: operator.mod,
+            }
+            return operations[type(node.op)](evaluate(node.left), evaluate(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in {ast.UAdd, ast.USub}:
+            operand = evaluate(node.operand)
+            return operand if isinstance(node.op, ast.UAdd) else -operand
+        raise ValueError("Unsupported expression")
+
+    return evaluate(tree)
 
 
 def fetch_page(url: str) -> str:
