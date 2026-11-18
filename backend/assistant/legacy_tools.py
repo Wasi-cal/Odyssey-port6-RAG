@@ -73,4 +73,4 @@ def calculate(expression: str):
 
 def fetch_page(url: str) -> str:
     """Download a page for the admin preview."""
-    return requests.get(url, verify=False, timeout=10).text
+    return requests.get(url, timeout=10).text
