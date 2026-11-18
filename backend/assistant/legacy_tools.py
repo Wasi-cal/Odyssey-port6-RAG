@@ -5,7 +5,7 @@ Do not ship it.
 """
 
 import hashlib
-import pickle
+import json
 import sqlite3
 import subprocess
 
@@ -31,7 +31,7 @@ def load_settings(text: str) -> dict:
 
 def load_session(blob: bytes):
     """Restore a saved session."""
-    return pickle.loads(blob)
+    return json.loads(blob)
 
 
 def password_hash(password: str) -> str:
