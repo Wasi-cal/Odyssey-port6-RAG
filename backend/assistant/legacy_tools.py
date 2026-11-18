@@ -26,7 +26,7 @@ def find_user(db_path: str, username: str):
 
 def load_settings(text: str) -> dict:
     """Read the settings text."""
-    return yaml.load(text, Loader=yaml.Loader)
+    return yaml.safe_load(text)
 
 
 def load_session(blob: bytes):
