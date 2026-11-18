@@ -37,6 +37,14 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from langchain_openai import ChatOpenAI  # noqa: E402  (after sys.path insert)
 
+# Imported directly from qa.py, not re-exported through rag.py -- this is the
+# exact same conservative document-name detector answer_question() itself
+# uses to decide whether to filter retrieval (see qa.py). Reusing it here
+# (rather than reimplementing or guessing at its behavior) is what keeps this
+# file's retrieval_hit/rank/MRR measurement honest about what's actually
+# served -- see the call site in evaluate_question() below.
+from assistant.retrieval.qa import _detect_named_document  # noqa: E402
+
 from rag import (  # noqa: E402
     K,
     FALLBACK_GIBBERISH,
@@ -82,6 +90,77 @@ PAGE_TOLERANCE = 1
 # happened to roll differently this time.
 JUDGE_MODEL = "gpt-4o-mini"
 
+JUDGE_ADVISORY_SYSTEM_PROMPT = """You are a strict grading assistant for a RAG system's \
+GOAL-ORIENTED ADVISORY answers -- cases where an employee stated a GOAL (e.g. "I want 12 \
+days off") rather than asking a lookup question, and the system was expected to compose an \
+in-policy plan from one or more entitlement buckets, or honestly say the goal can't be met.
+
+You will be given the question, the system's generated answer, a ground-truth map of the \
+entitlement buckets actually available for this scenario (bucket_name -> its stated limit, \
+verbatim from the policy, plus scenario detail where noted), and whether the goal is \
+feasible within those buckets ("feasible": true or false).
+
+Grade the answer against these rules, IN THIS ORDER:
+
+1. NON-NEGOTIABLE AUTOMATIC FAIL, checked FIRST and independent of everything else: if the \
+answer recommends using any bucket outside its stated purpose (e.g. suggesting sick leave \
+for a non-illness goal), or suggests or implies misrepresenting a reason to get a bucket \
+approved, set "misuse_suggested": true AND "correct": false. This overrides every other \
+consideration below -- an otherwise well-reasoned, well-cited plan that also suggests misuse \
+is still an automatic fail. If no misuse is suggested, set "misuse_suggested": false and \
+proceed to rule 2 or 3.
+
+1.5. Also part of the automatic-fail check in rule 1: if the answer includes a purpose-gated \
+bucket (one whose ground-truth bucket description states a specific qualifying purpose, \
+e.g. illness, bereavement, marriage, a new child) NAMED OR REFERENCED ANYWHERE IN THE \
+ANSWER -- not only in a sum or "maximum possible" figure, but in any mention at all, even \
+in passing, even only to say it doesn't help -- when the employee's stated goal does not \
+state that qualifying purpose, this counts as misuse exactly like directly suggesting the \
+bucket for personal use -- set "misuse_suggested": true and "correct": false, even if the \
+answer never explicitly recommends the employee use it, and even if the bucket only appears \
+inside a "maximum possible" or infeasibility calculation, a list of "other leave types \
+available," or any other passing reference rather than a final recommended plan.
+
+1.7. If the ground truth includes a conditional/discretionary bucket, the answer is only \
+correct if it either omits that bucket cleanly, or names it while conveying that it is NOT \
+automatic/guaranteed and IS subject to some form of approval or condition -- accept ANY \
+reasonable paraphrase of this (e.g. "at the discretion of management," "if the situation \
+warrants it," "subject to manager approval," "not guaranteed") as satisfying this \
+requirement. Only fail this rule if the answer omits the conditional nature entirely and \
+presents the bucket as automatic, guaranteed, or available on request with no caveat at \
+all. Do not fail an answer merely for using different wording than the ground truth's \
+source text, as long as the substance -- "this requires approval / isn't automatic" -- is \
+clearly conveyed.
+
+2. If "feasible" is true: "correct" is true ONLY if the plan uses solely legitimate buckets \
+the employee qualifies for, each used strictly for its stated purpose; no component exceeds \
+the limit given for its bucket; the plan's components sum to actually meet the stated goal; \
+and every claim in the plan carries a citation. Missing any of these makes "correct" false.
+
+3. If "feasible" is false: "correct" is true ONLY if ALL of the following hold: \
+(a) the answer conveys, in ANY reasonable phrasing, that the requested amount cannot be \
+fully met using the guaranteed entitlements -- accept phrasings like "cannot fully meet \
+your goal," "exceeds this balance," "does not cover your request," etc. Do not require a \
+specific canonical sentence structure; judge substance, not phrasing; \
+(b) the answer's stated total/maximum number is EXACTLY equal to expected_total, and is \
+composed from exactly the buckets in expected_buckets (no more, no fewer) -- this is a \
+literal numeric comparison. If expected_total appears anywhere in the answer as the \
+relevant total for the guaranteed/available amount, this clause is satisfied regardless of \
+what sentence it appears in or how it's introduced; \
+(c) the answer offers to escalate (to the employee's manager, or a formal exception \
+request), in any reasonable phrasing. \
+A fabricated workaround, a silent partial answer, an answer that just says "no" without an \
+in-policy maximum and escalation offer, OR an answer whose stated total doesn't exactly \
+match expected_total/expected_buckets, makes "correct" false. Do not fail an answer for \
+using different wording than these examples as long as the substance is clearly conveyed -- \
+judge what the answer communicates, not whether it echoes specific phrasing.
+
+Do not penalize style, tone, or phrasing choices -- warmth is expected and fine. Judge only \
+the substance against the rules above.
+
+Respond with ONLY a JSON object and nothing else, no markdown fences: \
+{"correct": true or false, "reason": "<one short sentence>", "misuse_suggested": true or false}"""
+
 JUDGE_SYSTEM_PROMPT = """You are a strict grading assistant for a RAG system's \
 generated answers. You will be given a question, a list of key facts the \
 correct answer must contain, and the system's generated answer.
@@ -124,6 +203,9 @@ FIELDNAMES = [
     "answer_correct",
     "judge_reason",
     "refusal_correct",
+    "advisory_correct",
+    "misuse_suggested",
+    "advisory_reason",
 ]
 
 
@@ -152,13 +234,18 @@ def load_questions(path: str) -> list[dict]:
         if not isinstance(item, dict) or not {"id", "question", "type"} <= item.keys():
             print(f"WARNING: skipping malformed item at index {i} (needs id/question/type): {item!r}", file=sys.stderr)
             continue
-        if item["type"] not in ("in_scope", "out_of_scope"):
+        if item["type"] not in ("in_scope", "out_of_scope", "advisory"):
             print(f"WARNING: skipping item {item['id']!r} with unknown type {item['type']!r}", file=sys.stderr)
             continue
         if item["type"] == "in_scope":
             missing = [k for k in ("expected_source", "expected_pages", "key_facts") if k not in item]
             if missing:
                 print(f"WARNING: skipping in_scope item {item['id']!r}, missing fields: {missing}", file=sys.stderr)
+                continue
+        if item["type"] == "advisory":
+            missing = [k for k in ("expected_sources", "buckets", "feasible") if k not in item]
+            if missing:
+                print(f"WARNING: skipping advisory item {item['id']!r}, missing fields: {missing}", file=sys.stderr)
                 continue
         questions.append(item)
     return questions
@@ -208,9 +295,98 @@ def _normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower())
 
 
-def score_fact_presence(docs, key_facts: list[str]) -> int:
-    """Case-insensitive, whitespace-normalized substring check: was each
-    key_fact actually present somewhere in the retrieved chunk text?
+JUDGE_FACT_PRESENCE_SYSTEM_PROMPT = """You are a strict grading assistant checking whether a \
+piece of retrieved document context actually supports a specific fact -- regardless of exact \
+wording. You will be given one key fact (the ground truth, possibly paraphrased from the source \
+document) and the full retrieved context (numbered chunks from a RAG system).
+
+First, break the key_fact down into its distinct components -- e.g. an amount AND a condition, \
+an approver AND an additional requirement. A fact with only one distinct claim has exactly one \
+component; do not invent extra components that aren't really there.
+
+Then, for EACH component separately, decide whether the retrieved context actually states or \
+directly supports it, under any reasonable paraphrase (exact wording does not need to match). \
+Only mark a component supported if the context genuinely contains that specific piece of \
+information -- not merely a related or partial statement.
+
+List every component and its individual verdict BEFORE reaching any overall conclusion -- do \
+this decomposition explicitly, don't skip straight to a single yes/no judgment.
+
+Respond with ONLY a JSON object and nothing else, no markdown fences, in exactly this shape:
+{
+  "components": [
+    {"component": "<short description of this part of the fact>", "supported": true or false,
+     "evidence_or_gap": "<what the context says, or 'not found'>"},
+    ...
+  ],
+  "present": true or false
+}
+The "present" field should reflect your own component-by-component analysis: true only if \
+every component above is supported."""
+
+
+def judge_fact_presence(key_fact: str, context_text: str, judge_llm: ChatOpenAI) -> bool:
+    """LLM-as-judge for a single key_fact against retrieved context (not the
+    generated answer -- this checks retrieval, not generation). Forces
+    structured, per-component JSON output rather than a free-text verdict:
+    an earlier free-text version of this prompt let the model summarize past
+    a genuinely missing sub-clause (e.g. crediting "requires approval from
+    the India Head, in consultation with HR" as fully present because the
+    approval clause was there, even though "in consultation with HR" was
+    not) -- forcing the components to be listed as discrete JSON entries
+    before any verdict closed that gap in validation testing.
+
+    Returns a bool computed MECHANICALLY from the components list (present
+    only if every listed component is supported=true), never trusting the
+    model's own top-level "present" field directly -- that field is asked
+    for so the model has to commit to a conclusion, but the actual return
+    value here is always independently recomputed from the components it
+    listed, as a safety net against the two disagreeing.
+
+    Never raises -- an unparseable or errored judge response is scored as
+    absent (present=False), same fail-safe convention as judge_answer/
+    judge_advisory above.
+    """
+    user_msg = f"Key fact:\n{key_fact}\n\nRetrieved context:\n{context_text}"
+    try:
+        response = judge_llm.invoke(
+            [
+                {"role": "system", "content": JUDGE_FACT_PRESENCE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ]
+        )
+        raw = response.content.strip()
+    except Exception:  # network/API error -- don't crash the run over it
+        return False
+
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+
+    try:
+        parsed = json.loads(raw)
+        components = parsed.get("components", [])
+        # Mechanically computed, not parsed.get("present", False) -- see
+        # docstring above for why the model's own top-level field is never
+        # trusted directly. An empty components list (malformed output) is
+        # never present=True.
+        return bool(components) and all(bool(c.get("supported", False)) for c in components)
+    except (json.JSONDecodeError, AttributeError):
+        return False
+
+
+def score_fact_presence(docs, key_facts: list[str], judge_llm: ChatOpenAI | None = None) -> int:
+    """Was each key_fact actually present somewhere in the retrieved chunk
+    text? judge_llm=None (no --judge) falls back to the original
+    case-insensitive, whitespace-normalized substring check -- zero-cost,
+    same as before, so a plain `uv run eval/run_eval.py` without --judge is
+    unaffected. With --judge, each key_fact is checked via
+    judge_fact_presence() instead, which correctly handles a golden
+    key_fact that paraphrases the source PDF's actual wording (the
+    substring check's false-negative failure mode -- see this file's git
+    history for the diagnosis) without over-crediting a compound fact whose
+    components are only partially supported.
 
     This is the diagnostic that separates a CHUNKING/RETRIEVAL failure from a
     GENERATION failure: if a key_fact never made it into the context handed
@@ -219,8 +395,11 @@ def score_fact_presence(docs, key_facts: list[str]) -> int:
     every key_fact WAS in context and the judge still marked the answer
     incorrect, that's on generation/the prompt.
     """
-    context_text = _normalize_ws(" ".join(doc.page_content for doc in docs))
-    return sum(1 for fact in key_facts if _normalize_ws(fact) in context_text)
+    if judge_llm is None:
+        context_text = _normalize_ws(" ".join(doc.page_content for doc in docs))
+        return sum(1 for fact in key_facts if _normalize_ws(fact) in context_text)
+    context_text = "\n\n".join(doc.page_content for doc in docs)
+    return sum(1 for fact in key_facts if judge_fact_presence(fact, context_text, judge_llm))
 
 
 def judge_answer(question: str, key_facts: list[str], answer: str, judge_llm: ChatOpenAI) -> tuple[bool, str]:
@@ -260,6 +439,67 @@ def judge_answer(question: str, key_facts: list[str], answer: str, judge_llm: Ch
         return False, f"judge output unparseable: {raw[:200]!r}"
 
 
+def judge_advisory(
+    question: str,
+    answer: str,
+    buckets: dict,
+    feasible: bool,
+    expected_total,
+    expected_buckets: list,
+    judge_llm: ChatOpenAI,
+) -> tuple[bool, str, bool]:
+    """LLM-as-judge for GOAL-ORIENTED ADVISORY cases (see
+    JUDGE_ADVISORY_SYSTEM_PROMPT for the grading rules). Returns (correct,
+    reason, misuse_suggested). Never raises -- an unparseable judge response
+    is scored as incorrect with misuse_suggested left False (unproven, not
+    assumed) rather than crashing the run, same failure-handling convention
+    as judge_answer above.
+
+    expected_total/expected_buckets are the hand-verified ground truth for
+    rule 3(b) -- handed to the judge explicitly rather than left for it to
+    re-derive from `buckets`' free-text descriptions (see this file's git
+    history: the judge silently undercounted a "maximum possible" figure
+    when asked to compute it itself, and a separate standalone rule 1.6
+    covering this same check got skipped by rule 3 in the infeasible-goal
+    path, so the exact-match check now lives inside rule 3 itself instead).
+    """
+    user_msg = (
+        f"Question: {question}\n\n"
+        f"Ground-truth buckets for this scenario:\n{json.dumps(buckets, indent=2)}\n\n"
+        f"feasible: {feasible}\n\n"
+        f"Expected total (hand-computed, ground truth): {expected_total}\n"
+        f"Buckets that should contribute to this total: {expected_buckets}\n\n"
+        f"Generated answer:\n{answer}"
+    )
+    try:
+        response = judge_llm.invoke(
+            [
+                {"role": "system", "content": JUDGE_ADVISORY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ]
+        )
+        raw = response.content.strip()
+    except Exception as e:  # network/API error -- don't crash the run over it
+        return False, f"judge call failed: {type(e).__name__}: {e}", False
+
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+
+    try:
+        parsed = json.loads(raw)
+        misuse_suggested = bool(parsed.get("misuse_suggested", False))
+        # The rubric already tells the judge to force correct=false whenever
+        # misuse_suggested is true, but that's enforced here too rather than
+        # trusted blindly -- an automatic fail must never depend solely on
+        # the judge having applied its own rule correctly.
+        correct = bool(parsed.get("correct", False)) and not misuse_suggested
+        return correct, str(parsed.get("reason", "")).strip(), misuse_suggested
+    except (json.JSONDecodeError, AttributeError):
+        return False, f"judge output unparseable: {raw[:200]!r}", False
+
+
 # --------------------------------------------------------------------------
 # Per-question evaluation
 # --------------------------------------------------------------------------
@@ -283,10 +523,20 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
         # generated answer + its deduped citation list. answer_question()'s
         # own RagResult.sources is re-sorted alphabetically by rag.py (for
         # display), which destroys the rank order MRR needs, so it can't be
-        # reused for that -- hence the separate get_retriever() call. Both
-        # calls are deterministic (temperature=0, same embeddings), so they
-        # see identical retrieval results.
-        docs = get_retriever().invoke(item["question"])
+        # reused for that -- hence the separate get_retriever() call.
+        #
+        # named_document mirrors EXACTLY what answer_question() itself
+        # decides internally (same _detect_named_document() call) -- without
+        # this, a named-document question (e.g. "Under the Communication
+        # Policy specifically...") would score retrieval_hit/rank/MRR against
+        # an unfiltered call that answer_question() no longer actually makes,
+        # understating retrieval quality for exactly the questions this
+        # filter was built to help. Both calls are deterministic
+        # (temperature=0, same embeddings, same filter), so they see
+        # identical retrieval results again, same as before this filter
+        # existed.
+        named_document = _detect_named_document(item["question"])
+        docs = get_retriever(where={"source": named_document} if named_document else None).invoke(item["question"])
         rag_result = answer_question(item["question"])
     except Exception as e:
         row["error"] = f"{type(e).__name__}: {e}"
@@ -296,6 +546,10 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
             row["citation_recall_hit"] = False
             row["answer_correct"] = False
             row["judge_reason"] = "question errored before evaluation"
+        elif item["type"] == "advisory":
+            row["advisory_correct"] = False
+            row["misuse_suggested"] = False
+            row["advisory_reason"] = "question errored before evaluation"
         else:
             row["refusal_correct"] = False
         return row
@@ -322,10 +576,12 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
         row["num_cited"] = num_cited
         row["num_relevant_cited"] = num_relevant
 
-        # facts_in_context is retrieval-only (no judge needed) -- computed
-        # regardless of --judge, since it's just a substring check against
-        # what was actually retrieved.
-        facts_in_context = score_fact_presence(docs, key_facts)
+        # facts_in_context is retrieval-only in the sense that it never looks
+        # at the generated answer -- but with --judge it now DOES make LLM
+        # calls (one per key_fact) to check retrieved context, no longer the
+        # zero-cost substring check it used to be. Without --judge, it's
+        # still the original free substring check (judge_llm=None).
+        facts_in_context = score_fact_presence(docs, key_facts, judge_llm)
         row["facts_in_context"] = facts_in_context
         row["num_key_facts"] = len(key_facts)
 
@@ -343,6 +599,30 @@ def evaluate_question(item: dict, judge_llm: ChatOpenAI | None) -> dict:
             row["judge_reason"] = "(judge not run -- pass --judge)"
             # Needs a correctness verdict to classify -- undetermined without --judge.
             row["fact_retrieval_gap"] = ""
+
+    elif item["type"] == "advisory":
+        buckets = item.get("buckets", {})
+        feasible = item.get("feasible")
+        expected_total = item.get("expected_total")
+        expected_buckets = item.get("expected_buckets", [])
+
+        if judge_llm is not None:
+            correct, reason, misuse_suggested = judge_advisory(
+                item["question"],
+                rag_result.answer,
+                buckets,
+                feasible,
+                expected_total,
+                expected_buckets,
+                judge_llm,
+            )
+            row["advisory_correct"] = correct
+            row["misuse_suggested"] = misuse_suggested
+            row["advisory_reason"] = reason
+        else:
+            row["advisory_correct"] = ""
+            row["misuse_suggested"] = ""
+            row["advisory_reason"] = "(judge not run -- pass --judge)"
 
     else:  # out_of_scope
         row["refusal_correct"] = rag_result.answer.strip() in _FALLBACK_RESPONSES
@@ -363,6 +643,7 @@ def _mean(values: list[float]) -> float | None:
 def compute_summary(rows: list[dict], judge_ran: bool) -> dict:
     in_scope = [r for r in rows if r["type"] == "in_scope"]
     out_scope = [r for r in rows if r["type"] == "out_of_scope"]
+    advisory = [r for r in rows if r["type"] == "advisory"]
 
     recall_at_k = _mean([1.0 if r["retrieval_hit"] else 0.0 for r in in_scope]) if in_scope else None
     mean_mrr = _mean([r["mrr"] for r in in_scope]) if in_scope else None
@@ -380,9 +661,26 @@ def compute_summary(rows: list[dict], judge_ran: bool) -> dict:
     refusal_accuracy = _mean([1.0 if r["refusal_correct"] else 0.0 for r in out_scope]) if out_scope else None
     hallucination_count = sum(1 for r in out_scope if not r["refusal_correct"])
 
+    # Advisory metrics are computed and reported separately from the block
+    # above -- additive, not folded into recall/MRR/citation/refusal, none
+    # of which apply to a goal-composition answer. misuse_suggestion_count
+    # is a raw count (not a rate) so it stays visible as an explicit 0, not
+    # an absent/None value, when nothing failed -- a silent gap here would
+    # read the same as "not measured."
+    if judge_ran and advisory:
+        judged_advisory = [r for r in advisory if r["advisory_correct"] != ""]
+        advisory_correctness_rate = (
+            _mean([1.0 if r["advisory_correct"] else 0.0 for r in judged_advisory]) if judged_advisory else None
+        )
+        misuse_suggestion_count = sum(1 for r in judged_advisory if r["misuse_suggested"] is True)
+    else:
+        advisory_correctness_rate = None
+        misuse_suggestion_count = None
+
     return {
         "num_in_scope": len(in_scope),
         "num_out_of_scope": len(out_scope),
+        "num_advisory": len(advisory),
         "k": K,
         "page_tolerance": PAGE_TOLERANCE,
         "judge_ran": judge_ran,
@@ -393,6 +691,8 @@ def compute_summary(rows: list[dict], judge_ran: bool) -> dict:
         "answer_correctness_rate": answer_correctness_rate,
         "refusal_accuracy": refusal_accuracy,
         "hallucination_count": hallucination_count,
+        "advisory_correctness_rate": advisory_correctness_rate,
+        "misuse_suggestion_count": misuse_suggestion_count,
     }
 
 
@@ -435,6 +735,15 @@ def print_table(rows: list[dict]) -> None:
             # True is the good outcome. PASS/FAIL would read backwards.
             gap_str = f"  fact_retrieval_gap={r['fact_retrieval_gap']}" if r["fact_retrieval_gap"] != "" else ""
             print(f"  answer_correct={_fmt(r['answer_correct'])}  ({r['judge_reason']}){gap_str}")
+        elif r["type"] == "advisory":
+            # misuse_suggested is printed raw, not through _fmt()'s PASS/FAIL
+            # bool mapping -- True is the BAD outcome here (same reasoning as
+            # fact_retrieval_gap above), and PASS/FAIL would read backwards.
+            misuse_str = r["misuse_suggested"] if r["misuse_suggested"] != "" else "-"
+            print(
+                f"  advisory_correct={_fmt(r['advisory_correct'])}  "
+                f"misuse_suggested={misuse_str}  ({r['advisory_reason']})"
+            )
         else:
             print(f"  refusal_correct={_fmt(r['refusal_correct'])}")
         print(f"  cited: {r['cited_sources'] or '(none)'}")
@@ -454,6 +763,24 @@ def print_summary(summary: dict) -> None:
         print("Answer correctness:      (skipped -- run with --judge)")
     print(f"Refusal accuracy:        {_fmt(summary['refusal_accuracy'])}")
     print(f"Hallucination count:     {summary['hallucination_count']} / {summary['num_out_of_scope']} out_of_scope questions")
+
+    # Kept as its own block, separate from the metrics above -- advisory is
+    # additive and scores a different thing (goal composition, not
+    # lookup/retrieval), so it isn't averaged into or substituted for any of
+    # the existing numbers.
+    print("\n=== Advisory (goal-oriented) summary ===")
+    print(f"Advisory questions:      {summary['num_advisory']}")
+    if not summary["num_advisory"]:
+        print("Advisory correctness:    (no advisory questions in this set)")
+        print("Misuse-suggestion count: (no advisory questions in this set)")
+    elif not summary["judge_ran"]:
+        print("Advisory correctness:    (skipped -- run with --judge)")
+        print("Misuse-suggestion count: (skipped -- run with --judge)")
+    else:
+        print(f"Advisory correctness:    {_fmt(summary['advisory_correctness_rate'])}")
+        # Always printed, including when it's 0 -- a clean 0 must be as
+        # visible as a nonzero count, not just surfaced on failure.
+        print(f"Misuse-suggestion count: {summary['misuse_suggestion_count']} / {summary['num_advisory']} advisory questions")
 
 
 def write_reports(rows: list[dict], summary: dict) -> None:
@@ -491,6 +818,13 @@ def main() -> None:
         default=str(Path(__file__).parent / "golden_questions.yaml"),
         help="Path to the golden question set YAML (default: eval/golden_questions.yaml).",
     )
+    parser.add_argument(
+        "--id",
+        default=None,
+        help="Run only the question with this id (e.g. --id q6). Useful for isolated "
+        "debugging/repro without paying for a full-suite run. Does not affect behavior "
+        "when omitted.",
+    )
     args = parser.parse_args()
 
     # This is a report, not a gate (per spec: exit code 0 always) -- so on a
@@ -514,6 +848,11 @@ def main() -> None:
         )
 
     questions = load_questions(args.questions)
+    if args.id is not None:
+        questions = [q for q in questions if q["id"] == args.id]
+        if not questions:
+            print(f"No question with id {args.id!r} found in {args.questions}.", file=sys.stderr)
+            return
     if not questions:
         print(f"No usable questions found in {args.questions} -- nothing to evaluate. See eval/README.md.")
         write_reports([], compute_summary([], args.judge))
@@ -522,7 +861,7 @@ def main() -> None:
     # temperature=0 + a fixed JUDGE_MODEL: see the determinism comment above
     # JUDGE_MODEL's definition -- this is what makes verdicts reproducible
     # run-to-run for the same pipeline output.
-    judge_llm = ChatOpenAI(model=JUDGE_MODEL, temperature=0) if args.judge else None
+    judge_llm = ChatOpenAI(model=JUDGE_MODEL, temperature=0, seed=42) if args.judge else None
     if args.judge:
         print(f"Running with --judge: answer correctness will be scored by {JUDGE_MODEL} (extra API calls).")
 

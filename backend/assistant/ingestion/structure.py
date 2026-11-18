@@ -53,6 +53,84 @@ def offset_to_page(offset: int, page_offsets: list[int]) -> int:
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 _NUMBERED_CLAUSE_RE = re.compile(r"^(?:Section\s+)?(\d+(?:\.\d+)*)\.?\s+[A-Z].{0,80}$")
 
+# Fix 1a: a bare single-integer "number" ("1.", "2.", "8.") is never trusted
+# as a real heading -- every real subsection heading in this corpus is
+# dotted ("1.2", "3.4.1", ...); a bare integer followed by a capitalized
+# word is what an ordinary numbered list item ("1. Verbal warning") looks
+# like too, and _NUMBERED_CLAUSE_RE can't otherwise tell the two apart.
+# Verified empirically across the whole corpus before hardcoding this (see
+# git history / the diagnostic that added this comment): every bare-integer
+# match found was either a list item or a TOC line with a trailing page
+# number ("1 Purpose 3") -- the real body headings those TOC lines describe
+# are rendered as markdown "#" headings ("## 1 Purpose"), a different branch
+# entirely, unaffected by this rule. No genuine bare-integer body heading
+# was found anywhere in the corpus.
+_BULLET_PREFIX_RE = re.compile(r"^[-*•]\s+")
+
+# Fix 1d: a dotted numbered-clause line ending in a bare, whitespace-
+# separated trailing integer ("3.1 Screening 3", "3.8 Whistleblower policy
+# 9") is a table-of-contents entry with its page number baked in, not a
+# real heading -- a real heading in this corpus's style either ends in the
+# heading text itself or is bold-terminated ("1.4 **NOMINATION...**"),
+# never a lone trailing digit separated by whitespace from the preceding
+# words. Verified empirically across the whole corpus before hardcoding
+# this: every match was one of HR Security Policy's own numbered TOC lines
+# (the one document in the corpus whose TOC uses "N.M Title P" numbered
+# style instead of bullets) -- no genuine heading anywhere ends this way.
+_TRAILING_PAGE_NUMBER_RE = re.compile(r"\s\d+\s*$")
+
+# Boundary-finding ONLY (see _first_real_heading_offset) -- NOT used by the
+# main detect_headings() clause branch, which stays governed strictly by
+# _NUMBERED_CLAUSE_RE + the Fix 1a/1b/1c filter exactly as specified.
+#
+# Every real subsection heading in this corpus is bold-styled by
+# pymupdf4llm ("1.1 **OBJECTIVE**"), which _NUMBERED_CLAUSE_RE's
+# `[A-Z]`-immediately-after-the-number requirement does NOT match (the
+# next character is "*", not a letter) -- confirmed empirically: real
+# headings never actually go through the clause branch at all, in either
+# the old code or this one; they've always been caught by the ALL-CAPS
+# branch instead. That means _accepted_clause_number alone can never find
+# a boundary for Fix 2 to gate the all-caps branch against -- it would
+# always come back empty and silently disable Fix 2's TOC check (this was
+# caught by testing against the real corpus before trusting it, not
+# assumed). This pattern tolerates 0-2 leading "*" after the number so a
+# bold real heading counts as a boundary candidate too, without changing
+# what the main clause branch itself accepts as a heading.
+_NUMBERED_BOLD_HEADING_RE = re.compile(r"^(\d+\.\d+(?:\.\d+)*)\.?\s+\*{0,2}[A-Z]")
+
+
+def _parse_number_path(number_str: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in number_str.split("."))
+
+
+def _is_plausible_next_heading_number(path: tuple[int, ...], candidate: tuple[int, ...]) -> bool:
+    """Fix 1b: is `candidate` a plausible NEXT real heading number given
+    `path` (the last ACCEPTED heading's own number, or () if none yet)?
+
+    Plausible means: a sibling at some shared depth with a LARGER value
+    than what's there now (e.g. 1.2 -> 1.3 or 1.2 -> 1.4 -- skipping ahead
+    is fine, a real document doesn't always number every single value), or
+    a child one level deeper than the current path starting fresh at .1
+    (e.g. 1.3 -> 1.3.1). Anything else -- equal to, or smaller than, what's
+    already been seen at the point the two numbers diverge -- is a restart
+    (e.g. 1.3 -> 1.1 after 1.3 was already accepted) and is rejected: no
+    real document's heading numbering goes backward.
+    """
+    if not path:
+        return True
+    common = 0
+    while common < len(path) and common < len(candidate) and path[common] == candidate[common]:
+        common += 1
+    if common == len(candidate):
+        # candidate is a prefix of (or identical to) path -- not a forward move.
+        return False
+    if common == len(path):
+        # path is a prefix of candidate -- going deeper is only plausible
+        # starting fresh at .1, not jumping straight to .2+.
+        return candidate[common] == 1
+    # They diverge at `common`: only forward (strictly greater) is plausible.
+    return candidate[common] > path[common]
+
 
 def _is_all_caps_heading(line: str) -> bool:
     s = line.strip()
@@ -65,6 +143,18 @@ def _is_all_caps_heading(line: str) -> bool:
 
 _MARKDOWN_EMPHASIS_RE = re.compile(r"[*_]{1,3}")
 
+# One specific, verified pymupdf4llm rendering artifact: HR Security
+# Policy-V1.0.pdf's "4 Roles and responsibilities" heading extracts as
+# "4 Roles and res onsibilities p" (a stray mid-word space plus a trailing
+# "p", from the PDF's own glyph run, not from anything this pipeline's code
+# does upstream of _clean_heading_text). Confirmed by grepping every PDF's
+# freshly-extracted page text corpus-wide before adding this: the exact
+# "res onsibilities" substring appears exactly once, on exactly this page of
+# exactly this document -- no other document's heading is affected.
+_KNOWN_GARBLED_HEADINGS = {
+    "4 Roles and res onsibilities p": "4 Roles and Responsibilities",
+}
+
 
 def _clean_heading_text(text: str) -> str:
     """pymupdf4llm renders bold/italic PDF text as markdown emphasis
@@ -75,27 +165,110 @@ def _clean_heading_text(text: str) -> str:
     here, at the point the heading is captured, rather than patching every
     place that later displays a section/subsection string.
     """
-    return _MARKDOWN_EMPHASIS_RE.sub("", text).strip()
+    cleaned = _MARKDOWN_EMPHASIS_RE.sub("", text).strip()
+    return _KNOWN_GARBLED_HEADINGS.get(cleaned, cleaned)
+
+
+def _accepted_clause_number(
+    stripped: str, prev_nonblank: str, path: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    """The four-part filter for treating a _NUMBERED_CLAUSE_RE match as a
+    real heading rather than an ordinary numbered list item or TOC entry --
+    see Fix 1a/1b/1c/1d in this module's git history. Returns the parsed
+    number path if ALL four checks pass, else None. `path` is the last
+    ACCEPTED clause heading's own number (empty tuple if none yet)."""
+    m = _NUMBERED_CLAUSE_RE.match(stripped)
+    if not m:
+        return None
+    number = m.group(1)
+    if "." not in number:  # Fix 1a: bare integers are never trusted
+        return None
+    candidate = _parse_number_path(number)
+    if not _is_plausible_next_heading_number(path, candidate):  # Fix 1b
+        return None
+    if prev_nonblank.endswith(":"):  # Fix 1c: list introduced by a colon sentence
+        return None
+    if _TRAILING_PAGE_NUMBER_RE.search(stripped):  # Fix 1d: TOC line with a baked-in page number
+        return None
+    return candidate
+
+
+def _first_real_heading_offset(text: str) -> int | None:
+    """Fix 2's TOC-boundary proxy: the offset of the first unambiguous real
+    heading (a markdown "#" heading, or a numbered-clause match that passes
+    Fix 1a/1b/1c), whichever comes first. Deliberately does NOT consider the
+    all-caps branch here -- that's exactly the branch Fix 2 needs a boundary
+    for, so it can't also be used to establish one.
+
+    There's no dedicated table-of-contents-block detector anywhere in this
+    ingestion pipeline (checked before adding this), so "before the first
+    real numbered/markdown heading" is the proxy used instead, per the task
+    that introduced this function. This is an approximation, flagged as one
+    on purpose: a document whose real body content genuinely starts before
+    its own first detectable heading (e.g. an un-numbered, non-"#" opening
+    paragraph followed only by ALL-CAPS-styled headings throughout) would
+    have its front matter boundary estimated as "the whole document," which
+    would fall back to today's un-filtered all-caps behavior for that
+    document specifically. Worth revisiting if that ever shows up in
+    practice -- no document in the corpus this was built against does this.
+    """
+    offset = 0
+    prev_nonblank = ""
+    path: tuple[int, ...] = ()
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if _MD_HEADING_RE.match(stripped):
+            return offset
+        candidate = _accepted_clause_number(stripped, prev_nonblank, path)
+        if candidate is not None:
+            return offset
+        if _NUMBERED_BOLD_HEADING_RE.match(stripped):
+            return offset
+        if stripped:
+            prev_nonblank = stripped
+        offset += len(line) + 1
+    return None
 
 
 def detect_headings(text: str) -> list[tuple[int, int, str]]:
     """Scan the whole-document text for heading-like lines. Returns a list of
     (char_offset, level, heading_text) sorted by offset (built in reading
-    order)."""
-    headings = []
+    order).
+
+    Three branches, in priority order: markdown "#" headings (trusted
+    outright -- pymupdf4llm only emits these for genuine structural
+    headings, never for prose), numbered clauses ("1.2 Eligibility") that
+    pass the Fix 1a/1b/1c filter in _accepted_clause_number, and ALL-CAPS
+    lines that are neither bulleted nor inside the document's presumed
+    front-matter/TOC block (Fix 2) -- a bare, unfiltered ALL-CAPS check
+    matches a TOC's own bullet list ("- **OBJECTIVE**") exactly as readily
+    as a real body heading ("1.4 **NOMINATION...**"), which is why both
+    guards are needed here rather than only one.
+    """
+    toc_boundary = _first_real_heading_offset(text)
+    headings: list[tuple[int, int, str]] = []
     offset = 0
+    prev_nonblank = ""
+    clause_path: tuple[int, ...] = ()
     for line in text.split("\n"):
         stripped = line.strip()
         md_match = _MD_HEADING_RE.match(stripped)
-        clause_match = None if md_match else _NUMBERED_CLAUSE_RE.match(stripped)
+        clause_number = None if md_match else _accepted_clause_number(stripped, prev_nonblank, clause_path)
         if md_match:
             level = len(md_match.group(1))
             headings.append((offset, level, _clean_heading_text(md_match.group(2))))
-        elif clause_match:
-            level = clause_match.group(1).count(".") + 1
+        elif clause_number is not None:
+            clause_path = clause_number
+            level = len(clause_number)
             headings.append((offset, level, _clean_heading_text(stripped)))
-        elif _is_all_caps_heading(stripped):
+        elif (
+            _is_all_caps_heading(stripped)
+            and not _BULLET_PREFIX_RE.match(stripped)
+            and (toc_boundary is None or offset >= toc_boundary)
+        ):
             headings.append((offset, 1, _clean_heading_text(stripped).title()))
+        if stripped:
+            prev_nonblank = stripped
         offset += len(line) + 1  # +1 for the "\n" split() consumed
     return headings
 

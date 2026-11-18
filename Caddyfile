@@ -15,15 +15,13 @@
 
 localhost:8501 {
 	tls internal
-	reverse_proxy ui:8501
+	# Chat UI at /, admin dashboard at /admin -- both served by the same
+	# Next.js container now (frontend/app/admin/page.tsx), so one route is
+	# enough; there's no separate admin-ui service/port anymore.
+	reverse_proxy ui:3000
 }
 
 localhost:8000 {
 	tls internal
 	reverse_proxy api:8000
-}
-
-localhost:8502 {
-	tls internal
-	reverse_proxy admin-ui:8502
 }

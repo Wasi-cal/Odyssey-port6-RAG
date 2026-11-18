@@ -1,0 +1,138 @@
+'use client';
+
+import { useCallback, useRef, useState } from 'react';
+import * as api from '@/lib/api';
+import { connectDeepgram } from './voice/deepgramConnection';
+import { connectOpenAI } from './voice/openaiConnection';
+import type { VoiceConnection } from './voice/types';
+import type { Message, SourceInfo, VoiceStatus } from '@/lib/types';
+
+interface UseRealtimeVoiceOptions {
+  /** Returns the chat session id to use for the search_policies tool's
+   * /voice/ask call -- same session the text UI uses, via useDocAssist's
+   * ensureSession(), so voice and text turns share history. */
+  getSessionId: () => Promise<string>;
+  /** Called once a search_policies round trip resolves -- pushes the
+   * exchange into the shared message thread (viaVoice: true), same as the
+   * old commitVoiceExchange did. */
+  onExchangeComplete: (question: string, reply: Message) => void;
+}
+
+/**
+ * Realtime voice connection, provider-agnostic -- mirrors the backend's
+ * RealtimeVoiceProvider split (assistant/voice/). POST /voice/session
+ * tells us which vendor is configured (config_store's voice/provider) via
+ * its `provider` field; this hook owns all the shared UI state (status,
+ * captions, sources, error) and just hands the minted session off to
+ * whichever connection module (hooks/voice/openaiConnection.ts or
+ * deepgramConnection.ts) matches. Both modules intercept the model's
+ * search_policies tool call the same way: hit our own POST /voice/ask,
+ * feed the grounded answer back into the session, and report the
+ * exchange up via onExchangeComplete so it lands in the shared thread.
+ */
+export function useRealtimeVoice({ getSessionId, onExchangeComplete }: UseRealtimeVoiceOptions) {
+  const [status, setStatus] = useState<VoiceStatus>('idle');
+  const [captionText, setCaptionText] = useState('');
+  const [sources, setSources] = useState<SourceInfo[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [inputAnalyser, setInputAnalyser] = useState<AnalyserNode | null>(null);
+  const [outputAnalyser, setOutputAnalyser] = useState<AnalyserNode | null>(null);
+
+  const connectionRef = useRef<VoiceConnection | null>(null);
+  const analyserPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopAnalyserPoll = useCallback(() => {
+    if (analyserPollRef.current) {
+      clearInterval(analyserPollRef.current);
+      analyserPollRef.current = null;
+    }
+  }, []);
+
+  // The output analyser in particular isn't available the instant
+  // connect() resolves -- both connection modules create it lazily, the
+  // moment the agent's first audio track/chunk actually arrives (there's
+  // no dedicated "audio graph ready" event to hook instead). Polling
+  // every 300ms for the connection's lifetime is cheap and simple, and
+  // just re-sets React state to the same object once it stabilizes (no
+  // extra re-renders beyond the one that matters).
+  const startAnalyserPoll = useCallback(() => {
+    stopAnalyserPoll();
+    analyserPollRef.current = setInterval(() => {
+      const a = connectionRef.current?.getAnalysers?.();
+      setInputAnalyser(a?.input ?? null);
+      setOutputAnalyser(a?.output ?? null);
+    }, 300);
+  }, [stopAnalyserPoll]);
+
+  const reset = useCallback(() => {
+    connectionRef.current?.disconnect();
+    connectionRef.current = null;
+    stopAnalyserPoll();
+    setStatus('idle');
+    setCaptionText('');
+    setSources([]);
+    setMuted(false);
+    setInputAnalyser(null);
+    setOutputAnalyser(null);
+  }, [stopAnalyserPoll]);
+
+  const disconnect = useCallback(() => {
+    // Clears any error left over from THIS call (not folded into reset()
+    // itself, since reset() is also called from connect()'s failure path
+    // immediately after setError() there -- clearing it there would wipe
+    // the very error just set) so a stale message can't linger into the
+    // next call.
+    setError(null);
+    reset();
+  }, [reset]);
+
+  const connect = useCallback(async () => {
+    console.log('[voice] connect() called');
+    setError(null);
+    setStatus('connecting');
+
+    try {
+      console.log('[voice] minting session via /voice/session...');
+      const session = await api.createVoiceSession();
+      console.log('[voice] session minted, provider:', session.provider, 'expires_at:', session.expires_at);
+
+      const callbacks = { setStatus, setCaptionText, setSources, setError, getSessionId, onExchangeComplete };
+      const connection =
+        session.provider === 'deepgram'
+          ? await connectDeepgram(session, callbacks)
+          : await connectOpenAI(session, callbacks);
+
+      connectionRef.current = connection;
+      const a = connection.getAnalysers?.();
+      setInputAnalyser(a?.input ?? null);
+      setOutputAnalyser(a?.output ?? null);
+      startAnalyserPoll();
+    } catch (err) {
+      console.error('[voice] connect() failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to start voice session.');
+      reset();
+    }
+  }, [getSessionId, onExchangeComplete, reset, startAnalyserPoll]);
+
+  const toggleMute = useCallback(() => {
+    setMuted((prev) => {
+      const next = !prev;
+      connectionRef.current?.setMuted?.(next);
+      return next;
+    });
+  }, []);
+
+  return {
+    status,
+    captionText,
+    sources,
+    error,
+    muted,
+    inputAnalyser,
+    outputAnalyser,
+    connect,
+    disconnect,
+    toggleMute,
+  };
+}

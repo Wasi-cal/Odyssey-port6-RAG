@@ -1,5 +1,5 @@
-__pycache__/
-*.pyc
-.DS_Store
-.env
-appv1.py
+node_modules
+.next
+next-env.d.ts
+.env.local
+.git

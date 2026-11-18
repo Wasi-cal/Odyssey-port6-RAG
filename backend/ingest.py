@@ -13,8 +13,10 @@ This module OWNS writes to ./chroma_db. assistant/retrieval/ and api.py only
 ever read from it.
 """
 
+import argparse
 import sys
 
+from assistant.embeddings import resolve_collection_name
 from assistant.ingestion.pipeline import ingest_all, ingest_files, load_and_split
 from assistant.ingestion.store import get_vector_store
 from assistant.openai_key import require_openai_api_key
@@ -31,6 +33,21 @@ __all__ = [
 ]
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "local"],
+        default=None,
+        help=(
+            "Embedding backend to ingest with (assistant/embeddings.py). Defaults to "
+            "config_store's embeddings/embed_provider ('openai' unless changed). 'local' "
+            "ingests the SAME PDFs into a separate collection (paths.LOCAL_COLLECTION_NAME) "
+            "via the local (sentence-transformers) model -- never overwrites the OpenAI "
+            "collection, for A/B comparison before committing to a switch."
+        ),
+    )
+    args = parser.parse_args()
+
     try:
         require_openai_api_key()
     except RuntimeError as e:
@@ -44,9 +61,10 @@ if __name__ == "__main__":
         print(f"No PDFs found in {DATA_DIR}. Add some and re-run.")
         sys.exit(0)
 
+    collection_name = resolve_collection_name(args.provider)
     print(f"Found {len(pdf_paths)} PDF(s): {[p.name for p in pdf_paths]}")
-    chunk_count, embed_tokens = ingest_files(pdf_paths)
+    chunk_count, embed_tokens = ingest_files(pdf_paths, args.provider)
     print(
         f"Ingested {chunk_count} chunks ({embed_tokens} embedding tokens) "
-        f"into '{COLLECTION_NAME}' at {PERSIST_DIR}"
+        f"into '{collection_name}' at {PERSIST_DIR}"
     )
