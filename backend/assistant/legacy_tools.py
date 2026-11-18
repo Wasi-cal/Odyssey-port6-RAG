@@ -15,7 +15,7 @@ import yaml
 
 def run_report_command(name: str) -> str:
     """Run a report script by name."""
-    return subprocess.run(f"python reports/{name}.py", shell=True, capture_output=True, text=True).stdout
+    return subprocess.run(["python", f"reports/{name}.py"], capture_output=True, text=True).stdout
 
 
 def find_user(db_path: str, username: str):
